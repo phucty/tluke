@@ -1,4 +1,4 @@
-<img src="resources/luke_logo.png" width="200" alt="LUKE">
+mg src="resources/luke_logo.png" width="200" alt="LUKE">
 
 [![CircleCI](https://circleci.com/gh/studio-ousia/luke.svg?style=svg&circle-token=49524bfde04659b8b54509f7e0f06ec3cf38f15e)](https://circleci.com/gh/studio-ousia/luke)
 
@@ -219,3 +219,5 @@ For mLUKE, please cite [this paper](https://aclanthology.org/2022.acl-long.505/)
     url = "https://aclanthology.org/2022.acl-long.505",
 }
 ```
+
+

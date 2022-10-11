@@ -6,37 +6,51 @@ import math
 import os
 import time
 from argparse import Namespace
-from typing import List, Tuple
+from enum import Flag
+from typing import List, Tuple, Union
 
 import click
 import numpy as np
 import tensorflow as tf
 import torch
 import torch.distributed as dist
+from luke.model import LukeConfig
+from luke.model_table import LukeTableConfig
+from luke.pretraining.batch_generator import LukePretrainingBatchGenerator
+from luke.pretraining.dataset import WikipediaPretrainingDataset
+from luke.pretraining.model import LukePretrainingModel, LukeTablePretrainingModel
+from luke.utils.model_utils import ENTITY_VOCAB_FILE
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForPreTraining
-
-from luke.model import LukeConfig
-from luke.pretraining.batch_generator import LukePretrainingBatchGenerator
-from luke.pretraining.dataset import WikipediaPretrainingDataset
-from luke.pretraining.model import LukePretrainingModel
-from luke.utils.model_utils import ENTITY_VOCAB_FILE
 
 METADATA_FILE = "metadata.json"
 
 logger = None
 
 
-def save_checkpoint(path: str, checkpoint_id: str, model: LukePretrainingModel, epoch: int, global_step: int):
+def save_checkpoint(
+    path: str,
+    checkpoint_id: str,
+    model: Union[LukePretrainingModel, LukeTablePretrainingModel],
+    epoch: int,
+    global_step: int,
+):
     checkpoint_state_dict = dict(epoch=epoch, global_step=global_step)
     model.save_checkpoint(path, checkpoint_id, checkpoint_state_dict, True)
 
 
-def load_checkpoint(path: str, checkpoint_id: str, model: LukePretrainingModel, **kwargs):
-    _, checkpoint_state_dict = model.load_checkpoint(path, checkpoint_id, **kwargs)
-    epoch = checkpoint_state_dict["epoch"]
-    global_step = checkpoint_state_dict["global_step"]
+def load_checkpoint(
+    path: str, checkpoint_id: str, model: Union[LukePretrainingModel, LukeTablePretrainingModel], **kwargs
+):
+    if checkpoint_id.endswith(".bin") or checkpoint_id.endswith(".pt"):
+        model_weights = torch.load(os.path.join(path, checkpoint_id), map_location="cpu")
+        model.load_state_dict(model_weights, strict=False)
+        epoch, global_step = 0, 0
+    else:
+        _, checkpoint_state_dict = model.load_checkpoint(path, checkpoint_id, **kwargs)
+        epoch = checkpoint_state_dict["epoch"]
+        global_step = checkpoint_state_dict["global_step"]
     return epoch, global_step
 
 
@@ -54,6 +68,54 @@ def load_dataset(dataset_dir: str) -> List[WikipediaPretrainingDataset]:
     assert len(frozenset([d.max_mention_length for d in datasets])) == 1
 
     return datasets
+
+
+def create_table_model_and_config(
+    args: Namespace,
+    entity_vocab_size: int,
+    local_rank: int,
+    max_num_rows: int = 32,
+    max_num_cols: int = 20,
+    max_cell_value_length: int = 128,
+    max_cell_tokens: int = 30,
+    reset_position_index_per_cell: bool = True,
+) -> Tuple[LukeTablePretrainingModel, LukeTableConfig]:
+    bert_config = AutoConfig.from_pretrained(args.bert_model_name)
+
+    config = LukeTableConfig(
+        entity_vocab_size=entity_vocab_size,
+        bert_model_name=args.bert_model_name,
+        entity_emb_size=args.entity_emb_size,
+        cls_entity_prediction=args.cls_entity_prediction,
+        **bert_config.to_dict(),
+        max_num_rows=max_num_rows,
+        max_num_cols=max_num_cols,
+        max_cell_value_length=max_cell_value_length,
+        max_cell_tokens=max_cell_tokens,
+        reset_position_index_per_cell=reset_position_index_per_cell,
+    )
+
+    model = LukeTablePretrainingModel(config)
+
+    if args.fix_bert_weights:
+        for param in model.parameters():
+            param.requires_grad = False
+        for param in model.entity_embeddings.parameters():
+            param.requires_grad = True
+        for param in model.entity_predictions.parameters():
+            param.requires_grad = True
+
+    if args.word_only_training:
+        model.entity_embeddings = None
+        model.entity_predictions = None
+
+    if args.disable_entity_prediction_bias:
+        model.entity_predictions.bias.requires_grad = False
+
+    if args.freeze_entity_emb:
+        model.entity_embeddings.entity_embeddings.weight.requires_grad = False
+
+    return model, config
 
 
 def create_model_and_config(
@@ -92,7 +154,9 @@ def create_model_and_config(
     return model, config
 
 
-def create_optimizer_grouped_parameters(model: LukePretrainingModel, weight_decay: float) -> List[dict]:
+def create_optimizer_grouped_parameters(
+    model: Union[LukePretrainingModel, LukeTablePretrainingModel], weight_decay: float
+) -> List[dict]:
     param_optimizer = list(model.named_parameters())
     param_optimizer = [n for n in param_optimizer if "pooler" not in n[0] and n[1].requires_grad]
     # parameter names for huggingface transformers
@@ -108,7 +172,9 @@ def create_optimizer_grouped_parameters(model: LukePretrainingModel, weight_deca
     return grouped_parameters
 
 
-def load_state_dict(state_dict: dict, model: LukePretrainingModel, config: LukeConfig):
+def load_state_dict(
+    state_dict: dict, model: Union[LukePretrainingModel, LukeTablePretrainingModel], config: LukeConfig
+):
     new_state_dict = {}
     for key, param in state_dict.items():
         key = key.replace("gamma", "weight").replace("beta", "bias")
@@ -144,11 +210,16 @@ def compute_total_training_steps(dataset_dir, train_batch_size, num_epochs):
 
 
 @click.command()
-@click.option("--dataset-dir", type=click.Path(), required=True)
-@click.option("--output-dir", type=click.Path(), required=True)
-@click.option("--deepspeed-config-file", type=click.Path(exists=True), required=True)
+@click.option("--dataset-dir", default="luke_pretraining_dataset", type=click.Path(), required=True)
+@click.option("--output-dir", default="luke_models", type=click.Path(), required=True)
+@click.option(
+    "--deepspeed-config-file",
+    default="pretraining_config/luke_base_stage1.json",
+    type=click.Path(exists=True),
+    required=True,
+)
 @click.option("--log-dir", type=click.Path())
-@click.option("--bert-model-name", default="roberta-large")
+@click.option("--bert-model-name", default="roberta-base")
 @click.option("--cls-entity-prediction", is_flag=True)
 @click.option("--disable-entity-prediction-bias", is_flag=True)
 @click.option("--entity-emb-size", default=256, type=int)
@@ -170,7 +241,15 @@ def compute_total_training_steps(dataset_dir, train_batch_size, num_epochs):
 @click.option("--whole-word-masking/--subword-masking", default=True)
 @click.option("--word-only-training", is_flag=True)
 @click.option("--freeze-entity-emb", is_flag=True)
+@click.option("--from-tables", is_flag=True)
+@click.option("--learn-relations", is_flag=True)
 def pretrain(**kwargs):
+    # import debugpy
+
+    # debugpy.listen(5678)
+    # print("Wait for client")
+    # debugpy.wait_for_client()
+    # print("Attached")
     global logger
 
     import deepspeed
@@ -179,6 +258,7 @@ def pretrain(**kwargs):
     logger = LoggerFactory.create_logger(__name__)
 
     args = Namespace(**kwargs)
+
     deepspeed.init_distributed(dist_backend="nccl")
 
     tf.config.set_visible_devices([], "GPU")
@@ -208,7 +288,19 @@ def pretrain(**kwargs):
     entity_vocab = representative_dataset.entity_vocab
 
     logger.info("Instantiating the model...")
-    model, config = create_model_and_config(args, entity_vocab.size, local_rank)
+    if args.from_tables:
+        model, config = create_table_model_and_config(
+            args,
+            entity_vocab_size=entity_vocab.size,
+            local_rank=local_rank,
+            max_num_rows=representative_dataset.max_num_rows,
+            max_num_cols=representative_dataset.max_num_cols,
+            max_cell_tokens=representative_dataset.max_cell_tokens,
+            reset_position_index_per_cell=representative_dataset.reset_position_index_per_cell,
+        )
+    else:
+        model, config = create_model_and_config(args, entity_vocab_size=entity_vocab.size, local_rank=local_rank)
+
     logger.info("Model configuration: %s", config)
 
     logger.info("Initializing Deepspeed...")
@@ -218,6 +310,7 @@ def pretrain(**kwargs):
     model, optimizer, _, lr_scheduler = deepspeed.initialize(
         config=args.deepspeed_config, model=model, model_parameters=optimizer_parameters
     )
+    # lr_scheduler.step()
 
     epoch = 0
     global_step = 0
@@ -242,6 +335,8 @@ def pretrain(**kwargs):
             load_module_strict = True
             if args.cls_entity_prediction:
                 load_module_strict = False  # CLSEntityPredictionHead is newly added to the model
+            load_module_strict = False
+
             _, _ = load_checkpoint(
                 target_checkpoint_dir,
                 target_checkpoint_id,
@@ -296,6 +391,7 @@ def pretrain(**kwargs):
         starting_step=int(global_step * train_batch_size),
         cls_entity_prediction=args.cls_entity_prediction,
         word_only=args.word_only_training,
+        from_tables=args.from_tables,
     )
 
     model.train()

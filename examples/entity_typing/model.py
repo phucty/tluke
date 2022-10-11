@@ -1,75 +1,158 @@
-from typing import Dict, List
+import tempfile
+from typing import Dict, Iterable, List, Tuple
 
 import torch
-import torch.nn as nn
-from allennlp.data import TextFieldTensors, Vocabulary
+from allennlp.data import (
+    DataLoader,
+    DatasetReader,
+    Instance,
+    Vocabulary,
+    TextFieldTensors,
+)
+from allennlp.data.data_loaders import SimpleDataLoader
+from allennlp.data.fields import LabelField, TextField
+from allennlp.data.token_indexers import TokenIndexer, SingleIdTokenIndexer
+from allennlp.data.tokenizers import Tokenizer, WhitespaceTokenizer
 from allennlp.models import Model
-from allennlp.training.metrics import F1MultiLabelMeasure
+from allennlp.modules import TextFieldEmbedder, Seq2VecEncoder
+from allennlp.modules.seq2vec_encoders import BagOfEmbeddingsEncoder
+from allennlp.modules.text_field_embedders import BasicTextFieldEmbedder
+from allennlp.modules.token_embedders import Embedding
+from allennlp.nn import util
+from allennlp.training.gradient_descent_trainer import GradientDescentTrainer
+from allennlp.training.optimizers import AdamOptimizer
+from allennlp.training.trainer import Trainer
 
-from .modules.feature_extractor import ETFeatureExtractor
 
-
-@Model.register("entity_typing")
-class EntityTypeClassifier(Model):
+class ClassificationTsvReader(DatasetReader):
     def __init__(
         self,
-        vocab: Vocabulary,
-        feature_extractor: ETFeatureExtractor,
-        dropout: float = 0.1,
-        label_name_space: str = "labels",
-        text_field_key: str = "tokens",
+        tokenizer: Tokenizer = None,
+        token_indexers: Dict[str, TokenIndexer] = None,
+        max_tokens: int = None,
+        **kwargs
     ):
+        super().__init__(**kwargs)
+        self.tokenizer = tokenizer or WhitespaceTokenizer()
+        self.token_indexers = token_indexers or {"tokens": SingleIdTokenIndexer()}
+        self.max_tokens = max_tokens
 
-        super().__init__(vocab=vocab)
-        self.feature_extractor = feature_extractor
-        self.classifier = nn.Linear(self.feature_extractor.get_output_dim(), vocab.get_vocab_size(label_name_space))
+    def _read(self, file_path: str) -> Iterable[Instance]:
+        with open(file_path, "r") as lines:
+            for line in lines:
+                text, sentiment = line.strip().split("\t")
+                tokens = self.tokenizer.tokenize(text)
+                if self.max_tokens:
+                    tokens = tokens[: self.max_tokens]
+                text_field = TextField(tokens, self.token_indexers)
+                label_field = LabelField(sentiment)
+                yield Instance({"text": text_field, "label": label_field})
 
-        self.text_field_key = text_field_key
-        self.label_name_space = label_name_space
 
-        self.dropout = nn.Dropout(p=dropout)
-        self.criterion = nn.BCEWithLogitsLoss()
-
-        self.metrics = {}
-        self.f1_score = F1MultiLabelMeasure(average="micro", threshold=0.0)
+class SimpleClassifier(Model):
+    def __init__(
+        self, vocab: Vocabulary, embedder: TextFieldEmbedder, encoder: Seq2VecEncoder
+    ):
+        super().__init__(vocab)
+        self.embedder = embedder
+        self.encoder = encoder
+        num_labels = vocab.get_vocab_size("labels")
+        self.classifier = torch.nn.Linear(encoder.get_output_dim(), num_labels)
 
     def forward(
-        self,
-        word_ids: TextFieldTensors,
-        entity_span: torch.LongTensor,
-        labels: torch.LongTensor = None,
-        entity_ids: torch.LongTensor = None,
-        input_sentence: List[str] = None,
-        **kwargs,
-    ):
-        feature_vector = self.feature_extractor(word_ids[self.text_field_key], entity_span, entity_ids)
-        feature_vector = self.dropout(feature_vector)
-        logits = self.classifier(feature_vector)
+        self, text: TextFieldTensors, label: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        # Shape: (batch_size, num_tokens, embedding_dim)
+        embedded_text = self.embedder(text)
+        # Shape: (batch_size, num_tokens)
+        mask = util.get_text_field_mask(text)
+        # Shape: (batch_size, encoding_dim)
+        encoded_text = self.encoder(embedded_text, mask)
+        # Shape: (batch_size, num_labels)
+        logits = self.classifier(encoded_text)
+        # Shape: (batch_size, num_labels)
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+        # Shape: (1,)
+        loss = torch.nn.functional.cross_entropy(logits, label)
+        return {"loss": loss, "probs": probs}
 
-        output_dict = {"input": input_sentence, "prediction": torch.softmax(logits, dim=-1)}
 
-        if labels is not None:
-            output_dict["loss"] = self.criterion(logits, labels.float())
-            output_dict["gold_label"] = labels
-            self.f1_score(logits, labels)
-        return output_dict
+def build_dataset_reader() -> DatasetReader:
+    return ClassificationTsvReader()
 
-    def make_output_human_readable(self, output_dict: Dict[str, torch.Tensor]):
-        output_dict["prediction"] = self.make_label_human_readable(output_dict["prediction"])
 
-        if "gold_label" in output_dict:
-            output_dict["gold_label"] = self.make_label_human_readable(output_dict["gold_label"])
-        return output_dict
+def read_data(reader: DatasetReader) -> Tuple[List[Instance], List[Instance]]:
+    print("Reading data")
+    training_data = list(reader.read("/home/phuc/git/luke/examples/allennlp-guide/quick_start/data/movie_review/train.tsv"))
+    validation_data = list(reader.read("/home/phuc/git/luke/examples/allennlp-guide/quick_start/data/movie_review/dev.tsv"))
+    return training_data, validation_data
 
-    def make_label_human_readable(self, labels: torch.Tensor) -> List[List[str]]:
-        human_readable_labels = []
-        for onehot in labels:
-            indices = torch.nonzero(onehot > 0.5).squeeze(1).tolist()
-            label_texts = [self.vocab.get_token_from_index(i, namespace=self.label_name_space) for i in indices]
-            human_readable_labels.append(label_texts)
-        return human_readable_labels
 
-    def get_metrics(self, reset: bool = False):
-        output_dict = {k: metric.get_metric(reset=reset) for k, metric in self.metrics.items()}
-        output_dict.update({"micro_" + k: v for k, v in self.f1_score.get_metric(reset).items()})
-        return output_dict
+def build_vocab(instances: Iterable[Instance]) -> Vocabulary:
+    print("Building the vocabulary")
+    return Vocabulary.from_instances(instances)
+
+
+def build_model(vocab: Vocabulary) -> Model:
+    print("Building the model")
+    vocab_size = vocab.get_vocab_size("tokens")
+    embedder = BasicTextFieldEmbedder(
+        {"tokens": Embedding(embedding_dim=10, num_embeddings=vocab_size)}
+    )
+    encoder = BagOfEmbeddingsEncoder(embedding_dim=10)
+    return SimpleClassifier(vocab, embedder, encoder)
+
+
+def run_training_loop():
+    dataset_reader = build_dataset_reader()
+
+    train_data, dev_data = read_data(dataset_reader)
+
+    vocab = build_vocab(train_data + dev_data)
+    model = build_model(vocab)
+
+    train_loader, dev_loader = build_data_loaders(train_data, dev_data)
+    train_loader.index_with(vocab)
+    dev_loader.index_with(vocab)
+
+    # You obviously won't want to create a temporary file for your training
+    # results, but for execution in binder for this guide, we need to do this.
+    with tempfile.TemporaryDirectory() as serialization_dir:
+        trainer = build_trainer(model, serialization_dir, train_loader, dev_loader)
+        print("Starting training")
+        trainer.train()
+        print("Finished training")
+
+    return model, dataset_reader
+
+
+def build_data_loaders(
+    train_data: List[Instance],
+    dev_data: List[Instance],
+) -> Tuple[DataLoader, DataLoader]:
+    train_loader = SimpleDataLoader(train_data, 8, shuffle=True)
+    dev_loader = SimpleDataLoader(dev_data, 8, shuffle=False)
+    return train_loader, dev_loader
+
+
+def build_trainer(
+    model: Model,
+    serialization_dir: str,
+    train_loader: DataLoader,
+    dev_loader: DataLoader,
+) -> Trainer:
+    parameters = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+    optimizer = AdamOptimizer(parameters)  # type: ignore
+    trainer = GradientDescentTrainer(
+        model=model,
+        serialization_dir=serialization_dir,
+        data_loader=train_loader,
+        validation_data_loader=dev_loader,
+        num_epochs=5,
+        optimizer=optimizer,
+        cuda_device=-1,
+    )
+    return trainer
+
+
+run_training_loop()

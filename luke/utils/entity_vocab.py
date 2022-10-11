@@ -4,11 +4,13 @@ import math
 import multiprocessing
 from collections import Counter, OrderedDict, defaultdict, namedtuple
 from contextlib import closing
+from email.policy import default
 from multiprocessing.pool import Pool
 from pathlib import Path
 from typing import Dict, List, TextIO
 
 import click
+from luke.utils.wikipedia_parser import WikipediaDumpDB
 from tqdm import tqdm
 from wikipedia2vec.dump_db import DumpDB
 
@@ -30,15 +32,18 @@ logger = logging.getLogger(__name__)
 @click.command()
 @click.argument("dump_db_file", type=click.Path())
 @click.argument("out_file", type=click.Path())
+@click.option("--min-count", default=0)
+@click.option("--language", type=str, default="en")
 @click.option("--vocab-size", default=1000000)
 @click.option("-w", "--white-list", type=click.File(), multiple=True)
 @click.option("--white-list-only", is_flag=True)
 @click.option("--pool-size", default=multiprocessing.cpu_count())
 @click.option("--chunk-size", default=100)
-def build_entity_vocab(dump_db_file: str, white_list: List[TextIO], **kwargs):
-    dump_db = DumpDB(dump_db_file)
+def build_entity_vocab(dump_db_file: str, white_list: List[TextIO], language: str, **kwargs):
+    # dump_db = DumpDB(dump_db_file)
+    dump_db = WikipediaDumpDB(dump_db_file)
     white_list = [line.rstrip() for f in white_list for line in f]
-    EntityVocab.build(dump_db, white_list=white_list, language=dump_db.language, **kwargs)
+    EntityVocab.build(dump_db, white_list=white_list, language=language, **kwargs)
 
 
 class EntityVocab:
@@ -181,14 +186,25 @@ class EntityVocab:
         dump_db: DumpDB,
         out_file: str,
         vocab_size: int,
+        min_count: int,
         white_list: List[str],
         white_list_only: bool,
         pool_size: int,
         chunk_size: int,
         language: str,
+        get_vocab_from_tables: bool=False,
     ):
         counter = Counter()
-        with tqdm(total=dump_db.page_size(), mininterval=0.5) as pbar:
+        if get_vocab_from_tables:
+            with tqdm(total=dump_db.page_size_table(), mininterval=1, desc="Tables") as pbar:
+                with closing(Pool(pool_size, initializer=EntityVocab._initialize_worker, initargs=(dump_db,))) as pool:
+                    for ret in pool.imap_unordered(
+                        EntityVocab._count_entities_from_tables, dump_db.titles(), chunksize=chunk_size
+                    ):
+                        counter.update(ret)
+                        pbar.update()
+
+        with tqdm(total=dump_db.page_size(), mininterval=1, desc="Paragraphs") as pbar:
             with closing(Pool(pool_size, initializer=EntityVocab._initialize_worker, initargs=(dump_db,))) as pool:
                 for ret in pool.imap_unordered(EntityVocab._count_entities, dump_db.titles(), chunksize=chunk_size):
                     counter.update(ret)
@@ -200,7 +216,8 @@ class EntityVocab:
         title_dict[MASK_TOKEN] = 0
 
         for title in white_list:
-            title_dict[title] = counter[title]
+            if counter[title] != 0:
+                title_dict[title] = counter[title]
 
         if not white_list_only:
             valid_titles = frozenset(dump_db.titles())
@@ -210,8 +227,11 @@ class EntityVocab:
                     if len(title_dict) == vocab_size:
                         break
 
+        Path(out_file).parent.mkdir(exist_ok=True, parents=True)
         with open(out_file, "w") as f:
             for ent_id, (title, count) in enumerate(title_dict.items()):
+                if 0 < count < min_count:
+                    continue
                 json.dump({"id": ent_id, "entities": [[title, language]], "count": count}, f, ensure_ascii=False)
                 f.write("\n")
 
@@ -223,10 +243,50 @@ class EntityVocab:
     @staticmethod
     def _count_entities(title: str) -> Dict[str, int]:
         counter = Counter()
-        for paragraph in _dump_db.get_paragraphs(title):
+        try:
+            wikipedia_article = _dump_db.get_paragraphs(title)
+        except Exception as message:
+            print(f"Count not parse: {title}")
+            print(message)
+            return counter
+        for paragraph in wikipedia_article:
             for wiki_link in paragraph.wiki_links:
                 title = _dump_db.resolve_redirect(wiki_link.title)
+                # Remove categories,
+                # and entities which are not available in Wikipedia
+                # - incorrect title caused by wikipedia parser
+                # - incorrect links (link without wikipedia pages)
+                if title.startswith("Category:") or not _dump_db.is_wikipedia_page(title):
+                    continue
                 counter[title] += 1
+        return counter
+
+    @staticmethod
+    def _count_entities_from_tables(title: str) -> Dict[str, int]:
+        counter = Counter()
+        try:
+            tables = _dump_db.get_tables(title)
+        except KeyError:
+            return counter
+        except Exception as message:
+            print(f"Count not parse: {title}")
+            print(message)
+            return counter
+        for table in tables:
+            if table.caption:
+                for wiki_link in table.caption.wiki_links:
+                    title = _dump_db.resolve_redirect(wiki_link.title)
+                    if title.startswith("Category:") or not _dump_db.is_wikipedia_page(title):
+                        continue
+                    counter[title] += 1
+
+            for row in table.cells:
+                for cell in row:
+                    for wiki_link in cell.wiki_links:
+                        title = _dump_db.resolve_redirect(wiki_link.title)
+                        if title.startswith("Category:") or not _dump_db.is_wikipedia_page(title):
+                            continue
+                        counter[title] += 1
         return counter
 
 
@@ -303,3 +363,20 @@ def build_multilingual_entity_vocab(
         for ent_id, item in enumerate(json_dicts):
             json.dump({"id": ent_id, **item}, f, ensure_ascii=False)
             f.write("\n")
+
+
+@click.command()
+@click.argument("dump_db_file", type=click.Path())
+@click.argument("out_file", type=click.Path())
+@click.option("--vocab-size", default=1000000)
+@click.option("--min-count", default=0)
+@click.option("--language", type=str, default="en")
+@click.option("-w", "--white-list", type=click.File(), multiple=True)
+@click.option("--white-list-only", is_flag=True)
+@click.option("--pool-size", default=multiprocessing.cpu_count())
+@click.option("--chunk-size", default=100)
+@click.option("--get-vocab-from-tables", is_flag=True)
+def build_table_entity_vocab(dump_db_file: str, white_list: List[TextIO], language: str, **kwargs):
+    dump_db = WikipediaDumpDB(dump_db_file)
+    white_list = [line.rstrip() for f in white_list for line in f]
+    EntityVocab.build(dump_db, white_list=white_list, language=language, **kwargs)

@@ -10,10 +10,9 @@ logging.getLogger("transformers").setLevel(logging.WARNING)
 
 import click
 import torch
-
 from luke.utils.model_utils import ModelArchive
 
-from examples.legacy.utils.experiment_logger import commet_logger_args, CometLogger, NullLogger
+from examples.legacy.utils.experiment_logger import CometLogger, NullLogger, commet_logger_args
 
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(message)s (%(funcName)s@%(filename)s:%(lineno)s)"
 
@@ -41,6 +40,12 @@ logger = logging.getLogger(__name__)
 @commet_logger_args
 @click.pass_context
 def cli(ctx, **kwargs):
+    import debugpy
+
+    debugpy.listen(5678)
+    print("Wait for client")
+    debugpy.wait_for_client()
+    print("Attached")
     args = Namespace(**kwargs)
 
     if args.local_rank == -1 and args.num_gpus > 1:
@@ -112,7 +117,6 @@ def cli(ctx, **kwargs):
 from examples.entity_disambiguation.main import cli as entity_disambiguation_cli
 
 cli.add_command(entity_disambiguation_cli)
-
 
 if __name__ == "__main__":
     cli()

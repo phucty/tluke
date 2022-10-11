@@ -1,17 +1,18 @@
 import functools
+import itertools
 import logging
 import multiprocessing
 import queue
 import random
 import unicodedata
-from collections import Counter
+from collections import Counter, defaultdict
+from operator import neg
 from typing import Dict, List, NamedTuple
 
 import numpy as np
-from transformers.models.roberta import RobertaTokenizer
-
 from luke.pretraining.dataset import WikipediaPretrainingDataset
 from luke.utils.entity_vocab import MASK_TOKEN
+from transformers.models.roberta import RobertaTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +37,15 @@ class LukePretrainingBatchGenerator:
         starting_step: int,
         word_only: bool = False,
         cls_entity_prediction: bool = False,
-        **dataset_kwargs
+        from_tables: bool = False,
+        **dataset_kwargs,
     ):
+        if from_tables:
+            func_batch_worker = LukeTablePretrainingBatchWorker
+        else:
+            func_batch_worker = LukePretrainingBatchWorker
         self._worker_func = functools.partial(
-            LukePretrainingBatchWorker,
+            func_batch_worker,
             datasets=datasets,
             batch_size=batch_size,
             masked_lm_prob=masked_lm_prob,
@@ -53,7 +59,7 @@ class LukePretrainingBatchGenerator:
             starting_step=starting_step,
             word_only=word_only,
             cls_entity_prediction=cls_entity_prediction,
-            **dataset_kwargs
+            **dataset_kwargs,
         )
 
     def generate_batches(self, queue_size: int = 10000):
@@ -65,7 +71,8 @@ class LukePretrainingBatchGenerator:
         try:
             while True:
                 try:
-                    yield output_queue.get(True, 1)
+                    example_obj = output_queue.get(True, 1)
+                    yield example_obj
                 except queue.Empty:
                     logger.debug("Queue is empty")
                     if not worker.is_alive():
@@ -92,7 +99,7 @@ class LukePretrainingBatchWorker(multiprocessing.Process):
         starting_step: int,
         word_only: bool,
         cls_entity_prediction: bool,
-        **dataset_kwargs
+        **dataset_kwargs,
     ):
         super().__init__()
 
@@ -315,8 +322,10 @@ class DatasetSampler:
         starting_step: int,
         smoothing_factor: float = 0.7,
         random_seed: int = 0,
+        from_tables: bool = False,
     ):
         np.random.seed(random_seed)
+        self.from_tables = from_tables
         self.datasets = datasets
         self.datasets_dirs = [d.dataset_dir for d in datasets]
 
@@ -330,9 +339,15 @@ class DatasetSampler:
         for i in range(starting_step // num_workers):
             d = self._sample_dataset()
             skip_counter[d] += num_workers
-        iterators = {
-            d.dataset_dir: d.create_iterator(skip=skip_counter[d], **self._dataset_kwargs) for d in self.datasets
-        }
+        if self.from_tables:
+            iterators = {
+                d.dataset_dir: d.create_table_iterator(skip=skip_counter[d], **self._dataset_kwargs)
+                for d in self.datasets
+            }
+        else:
+            iterators = {
+                d.dataset_dir: d.create_iterator(skip=skip_counter[d], **self._dataset_kwargs) for d in self.datasets
+            }
         return iterators
 
     def _sample_dataset(self):
@@ -364,3 +379,621 @@ class DatasetSampler:
         data_size_list = [size**smoothing_factor for size in data_size_list]
         size_sum = sum(data_size_list)
         return [size / size_sum for size in data_size_list]
+
+
+class LukeTablePretrainingBatchWorker(LukePretrainingBatchWorker):
+    def __init__(
+        self,
+        output_queue: multiprocessing.Queue,
+        datasets: List[WikipediaPretrainingDataset],
+        batch_size: int,
+        masked_lm_prob: float,
+        masked_entity_prob: float,
+        whole_word_masking: bool,
+        unmasked_word_prob: float,
+        random_word_prob: float,
+        unmasked_entity_prob: float,
+        random_entity_prob: float,
+        mask_words_in_entity_span: bool,
+        starting_step: int,
+        word_only: bool,
+        cls_entity_prediction: bool,
+        hor_rel_prob: float = 1,
+        hor_rel_neg_prob: float = 1,
+        ver_rel_prob: float = 1,
+        ver_rel_neg_prob: float = 1,
+        **dataset_kwargs,
+    ):
+        super().__init__(
+            output_queue=output_queue,
+            datasets=datasets,
+            batch_size=batch_size,
+            masked_lm_prob=masked_lm_prob,
+            masked_entity_prob=masked_entity_prob,
+            whole_word_masking=whole_word_masking,
+            unmasked_word_prob=unmasked_word_prob,
+            random_word_prob=random_word_prob,
+            unmasked_entity_prob=unmasked_entity_prob,
+            random_entity_prob=random_entity_prob,
+            mask_words_in_entity_span=mask_words_in_entity_span,
+            starting_step=starting_step,
+            word_only=word_only,
+            cls_entity_prediction=cls_entity_prediction,
+            **dataset_kwargs,
+        )
+        self._hor_rel_prob = hor_rel_prob
+        self._hor_rel_neg_prob = hor_rel_neg_prob
+        self._ver_rel_prob = ver_rel_prob
+        self._ver_rel_neg_prob = ver_rel_neg_prob
+
+    def run(self):
+        representative_dataset = self._datasets[0]
+
+        self._tokenizer = representative_dataset.tokenizer
+        self._entity_vocab = representative_dataset.entity_vocab
+        self._max_seq_length = representative_dataset.max_seq_length
+        self._max_entity_length = representative_dataset.max_entity_length
+        self._max_mention_length = representative_dataset.max_mention_length
+        self._max_num_rows = representative_dataset.max_num_rows
+        self._max_num_cols = representative_dataset.max_num_cols
+        self._max_cell_tokens = representative_dataset.max_cell_tokens
+        self._max_length_caption = representative_dataset.max_length_caption
+        self._max_header_tokens = representative_dataset.max_header_tokens
+        self._cls_id = self._tokenizer.convert_tokens_to_ids(self._tokenizer.cls_token)
+        self._sep_id = self._tokenizer.convert_tokens_to_ids(self._tokenizer.sep_token)
+        self._mask_id = self._tokenizer.convert_tokens_to_ids(self._tokenizer.mask_token)
+        self._pad_id = self._tokenizer.convert_tokens_to_ids(self._tokenizer.pad_token)
+        self._entity_mask_id = representative_dataset.entity_vocab.get_id(MASK_TOKEN, representative_dataset.language)
+
+        dataset_sampler = DatasetSampler(
+            datasets=self._datasets,
+            dataset_kwargs=self._dataset_kwargs,
+            starting_step=self._starting_step,
+            from_tables=True,
+        )
+
+        buf = []
+
+        class BufferItem(NamedTuple):
+            word_features: Dict[str, np.ndarray]
+            entity_features: Dict[str, np.ndarray]
+            page_id: int
+
+        max_word_len, max_word_hor_len, max_word_ver_len = 1, 1, 1
+        max_entity_len, max_entity_hor_len, max_entity_ver_len = 1, 1, 1
+        for item in dataset_sampler:
+            if not self._word_only:
+                entity_feat, masked_entity_positions = self._create_entity_features(
+                    entity_ids=item["entity_ids"],
+                    entity_position_ids=item["entity_position_ids"],
+                    entity_position_row_ids=item["entity_position_row_ids"],
+                    entity_position_col_ids=item["entity_position_col_ids"],
+                )
+                max_entity_len = max(max_entity_len, item["entity_ids"].size)
+                max_entity_hor_len = max(max_entity_hor_len, entity_feat["ent_hor_rel_len"])
+                max_entity_ver_len = max(max_entity_ver_len, entity_feat["ent_ver_rel_len"])
+            else:
+                entity_feat = None
+                masked_entity_positions = []
+
+            word_feat = self._create_word_features(
+                word_ids=item["word_ids"],
+                masked_entity_positions=masked_entity_positions,
+                word_row_ids=item["word_row_ids"],
+                word_col_ids=item["word_col_ids"],
+            )
+            max_word_len = max(max_word_len, item["word_ids"].size + 2)  # 2 for [CLS] and [SEP]
+            max_word_hor_len = max(max_word_hor_len, word_feat["word_hor_rel_len"])
+            max_word_ver_len = max(max_word_ver_len, word_feat["word_ver_rel_len"])
+
+            buf.append(BufferItem(word_feat, entity_feat, item["page_id"]))
+
+            if len(buf) == self._batch_size:
+                batch = {}
+                word_keys = buf[0].word_features.keys()
+                word_rels_keys = {
+                    "word_hor_rel_positions",
+                    "word_hor_rel_labels",
+                    "word_hor_rel_len",
+                    "word_ver_rel_positions",
+                    "word_ver_rel_labels",
+                    "word_ver_rel_len",
+                }
+                batch.update(
+                    {
+                        k: np.stack([o.word_features[k][:max_word_len] for o in buf])
+                        for k in word_keys
+                        if k not in word_rels_keys
+                    }
+                )
+
+                batch.update(
+                    {
+                        "word_hor_rel_positions": np.stack(
+                            [o.word_features["word_hor_rel_positions"][:max_word_hor_len] for o in buf]
+                        )
+                    }
+                )
+                batch.update(
+                    {
+                        "word_hor_rel_labels": np.stack(
+                            [o.word_features["word_hor_rel_labels"][:max_word_hor_len] for o in buf]
+                        )
+                    }
+                )
+                batch.update(
+                    {
+                        "word_ver_rel_positions": np.stack(
+                            [o.word_features["word_ver_rel_positions"][:max_word_ver_len] for o in buf]
+                        )
+                    }
+                )
+                batch.update(
+                    {
+                        "word_ver_rel_labels": np.stack(
+                            [o.word_features["word_ver_rel_labels"][:max_word_ver_len] for o in buf]
+                        )
+                    }
+                )
+
+                if self._cls_entity_prediction:
+                    batch.update({"page_id": np.array([o.page_id for o in buf], dtype=np.int)})
+
+                if not self._word_only:
+                    entity_keys = buf[0].entity_features.keys()
+                    entity_rels_keys = {
+                        "ent_hor_rel_positions",
+                        "ent_hor_rel_labels",
+                        "ent_hor_rel_len",
+                        "ent_ver_rel_positions",
+                        "ent_ver_rel_labels",
+                        "ent_ver_rel_len",
+                    }
+                    batch.update(
+                        {
+                            k: np.stack([o.entity_features[k][:max_entity_len] for o in buf])
+                            for k in entity_keys
+                            if k not in entity_rels_keys
+                        }
+                    )
+
+                    batch.update(
+                        {
+                            "ent_hor_rel_positions": np.stack(
+                                [o.entity_features["ent_hor_rel_positions"][:max_entity_hor_len] for o in buf]
+                            )
+                        }
+                    )
+                    batch.update(
+                        {
+                            "ent_hor_rel_labels": np.stack(
+                                [o.entity_features["ent_hor_rel_labels"][:max_entity_hor_len] for o in buf]
+                            )
+                        }
+                    )
+                    batch.update(
+                        {
+                            "ent_ver_rel_positions": np.stack(
+                                [o.entity_features["ent_ver_rel_positions"][:max_entity_ver_len] for o in buf]
+                            )
+                        }
+                    )
+                    batch.update(
+                        {
+                            "ent_ver_rel_labels": np.stack(
+                                [o.entity_features["ent_ver_rel_labels"][:max_entity_ver_len] for o in buf]
+                            )
+                        }
+                    )
+
+                self._output_queue.put(batch, True)
+
+                buf = []
+                max_word_len = 1
+                max_entity_len = 1
+
+    def _create_word_features(
+        self,
+        word_ids: np.ndarray,
+        masked_entity_positions: List[List[int]],
+        word_row_ids: np.ndarray,
+        word_col_ids: np.ndarray,
+    ):
+        output_word_ids = np.full(self._max_seq_length, self._pad_id, dtype=np.int)
+        output_word_ids[: word_ids.size + 2] = np.concatenate([[self._cls_id], word_ids, [self._sep_id]])
+
+        output_word_row_ids = np.full(self._max_seq_length, 0, dtype=np.int)
+        output_word_row_ids[: word_ids.size + 2] = np.concatenate([[0], word_row_ids, [0]])
+
+        output_word_col_ids = np.full(self._max_seq_length, 0, dtype=np.int)
+        output_word_col_ids[: word_ids.size + 2] = np.concatenate([[0], word_col_ids, [0]])
+
+        word_attention_mask = np.zeros(self._max_seq_length, dtype=np.int)
+        word_attention_mask[: word_ids.size + 2] = 1
+
+        ret = dict(
+            word_ids=output_word_ids,
+            word_row_ids=output_word_row_ids,
+            word_col_ids=output_word_col_ids,
+            word_attention_mask=word_attention_mask,
+            word_segment_ids=np.zeros(self._max_seq_length, dtype=np.int),
+        )
+
+        if self._masked_lm_prob != 0.0:
+            num_masked_words = 0
+            masked_lm_labels = np.full(self._max_seq_length, -1, dtype=np.int)
+
+            def perform_masking(indices: List[int]):
+                p = random.random()
+                for index in indices:
+                    masked_lm_labels[index] = output_word_ids[index]
+                    if p < (1.0 - self._random_word_prob - self._unmasked_word_prob):
+                        output_word_ids[index] = self._mask_id
+                    elif p < (1.0 - self._unmasked_word_prob):
+                        output_word_ids[index] = random.randint(self._pad_id + 1, self._tokenizer.vocab_size - 1)
+
+            masked_entity_positions_set = frozenset()
+            if self._mask_words_in_entity_span:
+                for indices in masked_entity_positions:
+                    perform_masking(indices)
+                    num_masked_words += len(indices)
+                masked_entity_positions_set = frozenset([p for li in masked_entity_positions for p in li])
+
+            num_to_predict = max(1, int(round(word_ids.size * self._masked_lm_prob)))
+            candidate_word_indices = []
+
+            for i, word in enumerate(self._tokenizer.convert_ids_to_tokens(word_ids), 1):  # 1 for [CLS]
+                if self._whole_word_masking and self._is_subword(word) and candidate_word_indices:
+                    candidate_word_indices[-1].append(i)
+                else:
+                    candidate_word_indices.append([i])
+
+            candidate_word_indices = [
+                indices
+                for indices in candidate_word_indices
+                if all(ind not in masked_entity_positions_set for ind in indices)
+            ]
+
+            for i in np.random.permutation(len(candidate_word_indices)):
+                indices_to_mask = candidate_word_indices[i]
+                if len(indices_to_mask) > num_to_predict - num_masked_words:
+                    continue
+
+                perform_masking(indices_to_mask)
+                num_masked_words += len(indices_to_mask)
+
+                if num_masked_words == num_to_predict:
+                    break
+
+            # If whole-word-masking is enabled, it is possible that no word cannot be selected for masking.
+            # To deal with this, we randomly select one (sub-)word for masking if num_masked_words is zero.
+            if num_masked_words == 0:
+                random_index = random.randint(1, word_ids.size - 2)
+                masked_lm_labels[random_index] = output_word_ids[random_index]
+                output_word_ids[random_index] = self._mask_id
+
+            ret["masked_lm_labels"] = masked_lm_labels
+
+        (
+            hor_rel_positions,
+            hor_rel_labels,
+            ver_rel_positions,
+            ver_rel_labels,
+        ) = self._create_cell_positions_from_col_row_index(
+            word_row_ids, word_col_ids, self._max_seq_length, self._masked_lm_prob
+        )
+
+        # 4 cells
+        output_hor_rel_positions = np.full((self._max_seq_length, 4, self._max_mention_length), -1, dtype=np.int)
+        output_hor_rel_labels = np.full(self._max_seq_length, -1, dtype=np.int)
+        output_ver_rel_positions = np.full((self._max_seq_length, 4, self._max_mention_length), -1, dtype=np.int)
+        output_ver_rel_labels = np.full(self._max_seq_length, -1, dtype=np.int)
+
+        if len(hor_rel_positions) and len(hor_rel_labels) and len(hor_rel_positions) == len(hor_rel_labels):
+            output_hor_rel_positions[: len(hor_rel_positions)] = hor_rel_positions
+            output_hor_rel_labels[: len(hor_rel_labels)] = hor_rel_labels
+        if len(ver_rel_positions) and len(ver_rel_labels) and len(ver_rel_positions) == len(ver_rel_labels):
+            output_ver_rel_positions[: len(ver_rel_positions)] = ver_rel_positions
+            output_ver_rel_labels[: len(ver_rel_labels)] = ver_rel_labels
+
+        ret["word_hor_rel_positions"] = output_hor_rel_positions
+        ret["word_hor_rel_labels"] = output_hor_rel_labels
+        ret["word_hor_rel_len"] = len(hor_rel_labels)
+        ret["word_ver_rel_positions"] = output_ver_rel_positions
+        ret["word_ver_rel_labels"] = output_ver_rel_labels
+        ret["word_ver_rel_len"] = len(ver_rel_labels)
+        return ret
+
+    def _create_entity_features(
+        self,
+        entity_ids: np.ndarray,
+        entity_position_ids: np.ndarray,
+        entity_position_row_ids: np.ndarray,
+        entity_position_col_ids: np.ndarray,
+    ):
+        output_entity_ids = np.zeros(self._max_entity_length, dtype=np.int)
+        output_entity_ids[: entity_ids.size] = entity_ids
+
+        entity_attention_mask = np.zeros(self._max_entity_length, dtype=np.int)
+        entity_attention_mask[: entity_ids.size] = 1
+
+        entity_position_ids += entity_position_ids != -1  # +1 for [CLS]
+        output_entity_position_ids = np.full((self._max_entity_length, self._max_mention_length), -1, dtype=np.int)
+        output_entity_position_ids[: entity_position_ids.shape[0]] = entity_position_ids
+
+        output_entity_position_row_ids = np.zeros(self._max_entity_length, dtype=np.int)
+        output_entity_position_row_ids[: entity_position_ids.shape[0]] = entity_position_row_ids
+
+        output_entity_position_col_ids = np.zeros(self._max_entity_length, dtype=np.int)
+        output_entity_position_col_ids[: entity_position_ids.shape[0]] = entity_position_col_ids
+
+        ret = dict(
+            entity_ids=output_entity_ids,
+            entity_position_ids=output_entity_position_ids,
+            entity_position_row_ids=output_entity_position_row_ids,
+            entity_position_col_ids=output_entity_position_col_ids,
+            entity_attention_mask=entity_attention_mask,
+            entity_segment_ids=np.zeros(self._max_entity_length, dtype=np.int),
+        )
+
+        masked_positions = []
+        if self._masked_entity_prob != 0.0:
+            num_to_predict = max(1, int(round(entity_ids.size * self._masked_entity_prob)))
+            masked_entity_labels = np.full(self._max_entity_length, -1, dtype=np.int)
+            for index in np.random.permutation(range(entity_ids.size))[:num_to_predict]:
+                p = random.random()
+                masked_entity_labels[index] = entity_ids[index]
+                if p < (1.0 - self._random_entity_prob - self._unmasked_entity_prob):
+                    output_entity_ids[index] = self._entity_mask_id
+                elif p < (1.0 - self._unmasked_entity_prob):
+                    output_entity_ids[index] = random.randint(self._entity_mask_id + 1, self._entity_vocab.size - 1)
+
+                masked_positions.append([int(p) for p in entity_position_ids[index] if p != -1])
+
+            ret["masked_entity_labels"] = masked_entity_labels
+
+        (
+            hor_rel_positions,
+            hor_rel_labels,
+            ver_rel_positions,
+            ver_rel_labels,
+        ) = self._create_cell_positions_from_col_row_index(
+            entity_position_row_ids, entity_position_col_ids, self._max_entity_length, self._masked_entity_prob
+        )
+
+        # 4 cells
+        output_hor_rel_positions = np.full((self._max_entity_length, 4, self._max_mention_length), -1, dtype=np.int)
+        output_hor_rel_labels = np.full(self._max_entity_length, -1, dtype=np.int)
+        output_ver_rel_positions = np.full((self._max_entity_length, 4, self._max_mention_length), -1, dtype=np.int)
+        output_ver_rel_labels = np.full(self._max_entity_length, -1, dtype=np.int)
+        if len(hor_rel_positions) and len(hor_rel_labels) and len(hor_rel_labels) == len(hor_rel_positions):
+            output_hor_rel_positions[: len(hor_rel_positions)] = hor_rel_positions
+            output_hor_rel_labels[: len(hor_rel_labels)] = hor_rel_labels
+
+        if len(ver_rel_positions) and len(ver_rel_labels) and len(ver_rel_labels) == len(ver_rel_positions):
+            output_ver_rel_positions[: len(ver_rel_positions)] = ver_rel_positions
+            output_ver_rel_labels[: len(ver_rel_labels)] = ver_rel_labels
+
+        ret["ent_hor_rel_positions"] = output_hor_rel_positions
+        ret["ent_hor_rel_labels"] = output_hor_rel_labels
+        ret["ent_hor_rel_len"] = len(hor_rel_labels)
+        ret["ent_ver_rel_positions"] = output_ver_rel_positions
+        ret["ent_ver_rel_labels"] = output_ver_rel_labels
+        ret["ent_ver_rel_len"] = len(ver_rel_labels)
+        return ret, masked_positions
+
+    def _create_cell_positions_from_col_row_index(self, position_row_ids, position_col_ids, max_length, masked_prob):
+        rows = defaultdict(set)
+        cols = defaultdict(set)
+        for i in range(len(position_row_ids)):
+            # Not select header or metadata cells
+            if position_row_ids[i] == 0 or position_col_ids[i] == 0:
+                continue
+            rows[position_row_ids[i]].add(position_col_ids[i])
+            cols[position_col_ids[i]].add(position_row_ids[i])
+
+        # x2 (postive sample and negative sample)
+        # x5 samples
+        num_to_predict = max(1, int(round(len(rows) * masked_prob * 2 * 8)))
+
+        def is_valid_cell(row_i, col_i):
+            if row_i in rows and col_i in rows[row_i]:
+                return True
+            return False
+
+        def is_valid_4_cells(cell_objs):
+            r1, c1, r2, c2, r3, c3, r4, c4 = cell_objs
+            if is_valid_cell(r1, c1) and is_valid_cell(r2, c2) and is_valid_cell(r3, c3) and is_valid_cell(r4, c4):
+                return True
+            return False
+
+        def get_index_from_col_row(rel_positions, rel_labels, max_cell_tokens):
+            catch_mapping = {}
+
+            def get_position_index(r, c):
+                if (r, c) in catch_mapping:
+                    return catch_mapping[(r, c)]
+
+                mapping = None
+                rs = np.where(position_row_ids == r)[0]
+                cs = np.where(position_col_ids == c)[0]
+
+                if len(rs) > 0 and len(cs) > 0:
+                    cans = np.intersect1d(rs, cs)
+                    if len(cans) > 0:
+                        mapping = [-1 for _ in range(max_cell_tokens)]
+                        cans = sorted(cans)[:max_cell_tokens]
+                        mapping[: len(cans)] = cans
+                catch_mapping[(r, c)] = mapping
+                return mapping
+
+            ret_rel_positions, ret_rel_labels = [], []
+
+            for i, (r1, c1, r2, c2, r3, c3, r4, c4) in enumerate(rel_positions):
+                cell1_position = get_position_index(r1, c1)
+                cell2_position = get_position_index(r2, c2)
+                cell3_position = get_position_index(r3, c3)
+                cell4_position = get_position_index(r4, c4)
+                if cell1_position is None or cell2_position is None or cell3_position is None or cell4_position is None:
+                    continue
+
+                ret_rel_positions.append([cell1_position, cell2_position, cell3_position, cell4_position])
+                ret_rel_labels.append(rel_labels[i])
+            return ret_rel_positions, ret_rel_labels
+
+        hor_rel_positions, hor_rel_labels = [], []
+        hor_rel_set = set()
+        if self._hor_rel_prob != 0.0 and len(cols) >= 2 and len(rows) >= 2:
+            for row_i1 in np.random.permutation(list(rows.keys())):
+                for col_i1 in np.random.permutation(list(rows[row_i1])):
+                    if len(hor_rel_labels) > num_to_predict:
+                        break
+                    row_cans = list(set(rows.keys()) - {row_i1})
+                    if not row_cans:
+                        continue
+                    row_i2 = np.random.choice(row_cans)
+                    col_cans = list(rows[row_i2] - {col_i1})
+                    if not col_cans:
+                        continue
+                    col_i2 = np.random.choice(col_cans)
+
+                    # | 1 | 2 | 3 |
+                    # | 4 | 5 | 6 |
+                    # | 7 | 8 | 9 |
+
+                    # Positive relationship
+                    # 1 -> 2 = 4 -> 5
+                    poss = set()
+                    poss_item = (row_i1, col_i1, row_i1, col_i2, row_i2, col_i1, row_i2, col_i2)
+                    if is_valid_4_cells(poss_item):
+                        poss.add(poss_item)
+                    if len(poss) and poss not in hor_rel_set:
+                        hor_rel_positions.extend(list(poss))
+                        hor_rel_labels.append(1)
+                        # Not use inverse relationships
+                        hor_rel_set.add((row_i1, col_i1, row_i1, col_i2))
+                        hor_rel_set.add((row_i1, col_i2, row_i1, col_i1))
+                    else:
+                        continue
+
+                    # Negative relationship other pairs
+                    col_cans = [col_i1, col_i2]
+                    row_cans = [row_i1, row_i2]
+                    if len(cols) > 2:
+                        col_candidates = rows[row_i2].intersection(rows[row_i1])
+                        col_candidates = list(col_candidates - set(col_cans))
+                        if not col_candidates:
+                            continue
+                        col_i3 = np.random.choice(col_candidates)
+                        col_cans.append(col_i3)
+
+                    random.shuffle(row_cans)
+                    random.shuffle(col_cans)
+                    negs = set()
+                    combination_cans = [row_cans, col_cans, row_cans, col_cans]
+                    for or_1, oc_1, or_2, oc_2 in itertools.product(*combination_cans):
+                        if or_1 == or_2 and oc_1 == oc_2:
+                            continue
+                        if (row_i1, col_i1, row_i1, col_i2) == (or_1, oc_1, or_2, oc_2):
+                            continue
+                        neg_item = (row_i1, col_i1, row_i1, col_i2, or_1, oc_1, or_2, oc_2)
+                        if neg_item not in poss and is_valid_4_cells(neg_item):
+                            negs.add(neg_item)
+                        if len(negs) >= self._hor_rel_neg_prob:
+                            break
+
+                    if len(negs):
+                        hor_rel_positions.extend(list(negs))
+                        hor_rel_labels.extend([0] * len(negs))
+
+        ver_rel_positions, ver_rel_labels = [], []
+        ver_rel_set = set()
+        if self._ver_rel_prob != 0.0 and len(rows) >= 3:
+            for row_i1 in np.random.permutation(list(rows.keys())):
+                for col_i1 in np.random.permutation(list(rows[row_i1])):
+                    if len(ver_rel_labels) > num_to_predict:
+                        break
+                    row_cans = list(set(rows.keys()) - {row_i1})
+                    if not row_cans:
+                        continue
+                    row_i2 = np.random.choice(row_cans)
+
+                    row_cans = list(set(rows.keys()) - {row_i1, row_i2})
+                    if not row_cans:
+                        continue
+                    row_i3 = np.random.choice(row_cans)
+
+                    # | 1 | 2 | 3 |
+                    # | 4 | 5 | 6 |
+                    # | 7 | 8 | 9 |
+
+                    # Positive relationship
+                    if col_i1 not in rows[row_i1] or col_i1 not in rows[row_i2] or col_i1 not in rows[row_i3]:
+                        continue
+                    poss = set()
+                    # 1 -> 4 = 1 -> 7
+                    poss_item = (row_i1, col_i1, row_i2, col_i1, row_i1, col_i1, row_i3, col_i1)
+                    if is_valid_4_cells(poss_item):
+                        poss.add(poss_item)
+                    # 1 -> 4 = 4 -> 7
+                    poss_item = (row_i1, col_i1, row_i2, col_i1, row_i2, col_i1, row_i3, col_i1)
+                    if is_valid_4_cells(poss_item):
+                        poss.add(poss_item)
+
+                    selected_poss = None
+                    if len(poss):
+                        selected_poss = list(poss)[np.random.choice(range(len(poss)))]
+                        or_1, oc_1, or_2, oc_2 = selected_poss[:4]
+                        if (or_1, oc_1, or_2, oc_2) not in ver_rel_set:
+                            # Not use inverse relationships
+                            ver_rel_set.add((or_1, oc_1, or_2, oc_2))
+                            ver_rel_set.add((or_2, oc_2, or_1, oc_1))
+
+                    if selected_poss:
+                        ver_rel_positions.append(selected_poss)
+                        ver_rel_labels.append(1)
+                    else:
+                        continue
+
+                    # Negative relationship
+                    col_cans = [col_i1]
+                    row_cans = [row_i1, row_i2, row_i3]
+                    if len(cols) > 2:
+                        col_candidates = rows[row_i1] & rows[row_i2] & rows[row_i3]
+                        col_candidates = list(col_candidates - set(col_cans))
+                        if not col_candidates:
+                            continue
+                        col_i2 = np.random.choice(col_candidates)
+                        col_cans.append(col_i2)
+
+                    random.shuffle(row_cans)
+                    random.shuffle(col_cans)
+                    negs = set()
+                    combination_cans = [row_cans, col_cans, row_cans, col_cans]
+                    for or_1, oc_1, or_2, oc_2 in itertools.product(*combination_cans):
+                        if or_1 == or_2 and oc_1 == oc_2:
+                            continue
+                        if (row_i1, col_i1, row_i2, col_i1) == (or_1, oc_1, or_2, oc_2):
+                            continue
+                        neg_item = (row_i1, col_i1, row_i2, col_i1, or_1, oc_1, or_2, oc_2)
+                        if neg_item not in poss and is_valid_4_cells(neg_item):
+                            negs.add(neg_item)
+
+                        if len(negs) >= self._ver_rel_neg_prob:
+                            break
+                    if len(negs):
+                        ver_rel_positions.extend(list(negs))
+                        ver_rel_labels.extend([0] * len(negs))
+
+        output_hor_rel_positions, output_hor_rel_labels = get_index_from_col_row(
+            hor_rel_positions, hor_rel_labels, self._max_cell_tokens
+        )
+        output_ver_rel_positions, output_ver_rel_labels = get_index_from_col_row(
+            ver_rel_positions, ver_rel_labels, self._max_cell_tokens
+        )
+        return (
+            output_hor_rel_positions[:max_length],
+            output_hor_rel_labels[:max_length],
+            output_ver_rel_positions[:max_length],
+            output_ver_rel_labels[:max_length],
+        )

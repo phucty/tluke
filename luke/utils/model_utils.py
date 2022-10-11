@@ -1,16 +1,16 @@
 import json
 import os
-from pathlib import Path
 import tarfile
 import tempfile
+from pathlib import Path
 from typing import Dict
 
 import click
 import torch
-
 from luke.model import LukeConfig
-from .entity_vocab import EntityVocab
 from transformers import AutoTokenizer
+
+from .entity_vocab import EntityVocab
 
 MODEL_FILE = "pytorch_model.bin"
 METADATA_FILE = "metadata.json"

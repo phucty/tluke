@@ -4,7 +4,7 @@ from collections import OrderedDict
 
 import click
 import torch
-from transformers import LukeConfig, LukeForMaskedLM, AutoTokenizer
+from transformers import AutoTokenizer, LukeConfig, LukeForMaskedLM
 from transformers.tokenization_utils_base import AddedToken
 
 

@@ -2,12 +2,15 @@ import logging
 import multiprocessing
 import os
 import random
+from email.policy import default
 
 import click
 import numpy as np
 import torch
 from wikipedia2vec.dump_db import DumpDB
 from wikipedia2vec.utils.wiki_dump_reader import WikiDumpReader
+
+from luke.utils.wikipedia_parser import WikiDumpReader, WikipediaDumpDB
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"  # filter out INFO messages from Tensordflow
 try:
@@ -18,12 +21,20 @@ try:
 except ImportError:
     pass
 
+
+import debugpy
+
 import luke.pretraining.dataset
 import luke.pretraining.train
+import luke.utils.convert_luke_to_huggingface_model
 import luke.utils.entity_vocab
 import luke.utils.interwiki_db
 import luke.utils.model_utils
-import luke.utils.convert_luke_to_huggingface_model
+
+# debugpy.listen(5678)
+# print("Wait for client")
+# debugpy.wait_for_client()
+# print("Attached")
 
 
 @click.group()
@@ -64,6 +75,9 @@ cli.add_command(luke.utils.entity_vocab.build_multilingual_entity_vocab)
 cli.add_command(luke.utils.model_utils.create_model_archive)
 cli.add_command(luke.utils.convert_luke_to_huggingface_model.convert_luke_to_huggingface_model)
 
+
+cli.add_command(luke.utils.wikipedia_parser.build_table_dump_db)
+cli.add_command(luke.utils.entity_vocab.build_table_entity_vocab)
 
 if __name__ == "__main__":
     cli()

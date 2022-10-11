@@ -16,7 +16,7 @@ token_indexers = {
     )
 }
 
-test_data_path = "examples/entity_typing/tests/fixtures/test.json"
+test_data_path = "/home/phuc/git/luke/examples/entity_typing/tests/fixtures/test.json"
 
 
 def test_read():

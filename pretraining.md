@@ -37,6 +37,12 @@ A Wikipedia dump file is converted to the database file using the
 python luke/cli.py build-dump-db enwiki-latest-pages-articles.xml.bz2 enwiki.db
 ```
 
+**LUKE for tabular data:**
+```bash
+python luke/cli.py build-table-dump-db data/enwiki-20181220-pages-articles-multistream.xml.bz2 data/enwiki_table.db
+```
+
+
 **mLUKE:**
 
 Create the dataset for the 24 languages.
@@ -55,10 +61,20 @@ The number of entities included in the vocabulary can be configured using the
 
 ```bash
 python luke/cli.py \
-    build-entity-vocab \
-    enwiki.db \
-    luke_entity_vocab.jsonl \
+    build-table-entity-vocab \
+    data/enwiki_wtable.db \
+    data/luke_entity_vocab_500k.json \
     --vocab-size=500000
+```
+
+**LUKE for tabular data:**
+```bash
+python luke/cli.py \
+    build-table-entity-vocab \
+    data/enwiki_table.db \
+    data/luke_table_entity_vocab_500k.jsonl \
+    --vocab-size=500000 \
+    --get-vocab-from-tables
 ```
 
 **mLUKE:**
@@ -107,6 +123,18 @@ python luke/cli.py \
     --include-unk-entities
 ```
 
+**LUKE for tabular data:**
+```bash
+python luke/cli.py \
+    build-wikipedia-pretraining-dataset \
+    data/enwiki_table.db \
+    "roberta-base" \
+    data/luke_entity_vocab_500k.jsonl \
+    luke_pretraining_dataset_500k \
+    --sentence-splitter=opennlp \
+    --include-unk-entities
+```
+
 **mLUKE:**
 ```bash
 for l in ar bn de nl el en es fi fr hi id it ja ko pl pt ru sv sw te th tr vi zh
@@ -130,7 +158,7 @@ rate scheduler.
 ```bash
 python luke/cli.py \
     compute-total-training-steps \
-    --dataset-dir=luke_pretraining_dataset \
+    --dataset-dir=luke_pretraining_dataset_20181220_500k \
     --train-batch-size=2048 \
     --num-epochs=20
 ```
@@ -192,6 +220,34 @@ deepspeed \
     --resume-checkpoint-id=<STAGE1_LAST_CHECKPOINT_DIR>
 ```
 
+**LUKE for tabular data (stage 1):**
+```bash
+deepspeed \
+    --num_gpus=2 \
+    luke/pretraining/train.py \
+    --output-dir=luke_models_base_500k \
+    --deepspeed-config-file=pretraining_config/luke_base_stage1.json \
+    --dataset-dir=luke_pretraining_dataset_500k/ \
+    --bert-model-name=roberta-base \
+    --num-epochs=20 \
+    --save-interval-steps=1000 \
+    --fix-bert-weights \
+    --resume-checkpoint-id=luke_models_base_500k/checkpoints/step0002000/
+```
+
+**LUKE for tabular data (stage 2):**
+```bash
+deepspeed \
+    --num_gpus=1 \
+    luke/pretraining/train.py \
+    --output-dir=luke_models_base_500k \
+    --deepspeed-config-file=pretraining_config/luke_base_stage2.json \
+    --dataset-dir=luke_pretraining_dataset_500k/ \
+    --bert-model-name=roberta-base \
+    --num-epochs=20 \
+    --reset-optimization-states \
+    --resume-checkpoint-id=luke_models_base_500k/checkpoints/step0002000
+```
 **mLUKE (stage 1):**
 
 ```bash

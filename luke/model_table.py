@@ -1,46 +1,52 @@
 import logging
 import math
+from tkinter.font import BOLD
 from typing import Dict
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers.models.bert.modeling_bert import (BertConfig, BertEmbeddings,
-                                                    BertIntermediate,
-                                                    BertLayer, BertOutput,
-                                                    BertPooler, BertSelfOutput)
+from transformers.models.bert.modeling_bert import (
+    BertEmbeddings,
+    BertIntermediate,
+    BertLayer,
+    BertOutput,
+    BertPooler,
+    BertSelfOutput,
+)
 from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
+
+from luke.model import LukeConfig, LukeModel
 
 logger = logging.getLogger(__name__)
 
 
-class LukeConfig(BertConfig):
+class LukeTableConfig(LukeConfig):
     def __init__(
         self,
-        vocab_size: int,
-        entity_vocab_size: int,
-        bert_model_name: str,
-        entity_emb_size: int = None,
-        cls_entity_prediction: bool = False,
+        max_num_rows: int = 32,
+        max_num_cols: int = 20,
+        max_cell_tokens: int = 30,
+        max_length_caption: int = 128,
+        max_header_tokens: int = 16,
+        reset_position_index_per_cell: bool = True,
         **kwargs,
     ):
-        super().__init__(vocab_size, **kwargs)
+        super().__init__(**kwargs)
+        self.max_num_rows = max_num_rows
+        self.max_num_cols = max_num_cols
+        self.max_cell_tokens = max_cell_tokens
+        self.max_length_caption = max_length_caption
+        self.max_header_tokens = max_header_tokens
 
-        self.entity_vocab_size = entity_vocab_size
-        self.bert_model_name = bert_model_name
-        if entity_emb_size is None:
-            self.entity_emb_size = self.hidden_size
-        else:
-            self.entity_emb_size = entity_emb_size
-
-        self.cls_entity_prediction = cls_entity_prediction
+        self.reset_position_index_per_cell = reset_position_index_per_cell
 
     def __repr__(self):
         return "{} {}".format(self.__class__.__name__, self.to_json_string(use_diff=False))
 
 
-class EntityEmbeddings(nn.Module):
-    def __init__(self, config: LukeConfig):
+class TableEntityEmbeddings(nn.Module):
+    def __init__(self, config: LukeTableConfig):
         super().__init__()
         self.config = config
 
@@ -49,13 +55,22 @@ class EntityEmbeddings(nn.Module):
             self.entity_embedding_dense = nn.Linear(config.entity_emb_size, config.hidden_size, bias=False)
 
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+
+        self.position_row_embeddings = nn.Embedding(config.max_num_rows + 1, config.hidden_size)
+        self.position_col_embeddings = nn.Embedding(config.max_num_cols + 1, config.hidden_size)
+
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
 
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(
-        self, entity_ids: torch.LongTensor, position_ids: torch.LongTensor, token_type_ids: torch.LongTensor = None
+        self,
+        entity_ids: torch.LongTensor,
+        position_ids: torch.LongTensor,
+        position_row_ids: torch.LongTensor,
+        position_col_ids: torch.LongTensor,
+        token_type_ids: torch.LongTensor = None,
     ):
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(entity_ids)
@@ -70,17 +85,26 @@ class EntityEmbeddings(nn.Module):
         position_embeddings = torch.sum(position_embeddings, dim=-2)
         position_embeddings = position_embeddings / position_embedding_mask.sum(dim=-2).clamp(min=1e-7)
 
+        position_row_embeddings = self.position_row_embeddings(position_row_ids)
+        position_col_embeddings = self.position_row_embeddings(position_col_ids)
+
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
-        embeddings = entity_embeddings + position_embeddings + token_type_embeddings
+        embeddings = (
+            entity_embeddings
+            + position_embeddings
+            + token_type_embeddings
+            + position_row_embeddings
+            + position_col_embeddings
+        )
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
 
         return embeddings
 
 
-class LukeEncoder(nn.Module):
-    def __init__(self, config: LukeConfig):
+class LukeTableEncoder(nn.Module):
+    def __init__(self, config: LukeTableConfig):
         super().__init__()
         self.output_hidden_states = config.output_hidden_states
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
@@ -102,39 +126,181 @@ class LukeEncoder(nn.Module):
             outputs = outputs + (all_hidden_states,)
         return outputs
 
-class LukeModel(nn.Module):
-    def __init__(self, config: LukeConfig):
+
+def create_position_ids_from_input_ids(input_ids, padding_idx, past_key_values_length=0):
+    """
+    Replace non-padding symbols with their position numbers. Position numbers begin at padding_idx+1. Padding symbols
+    are ignored. This is modified from fairseq's `utils.make_positions`.
+
+    Args:
+        x: torch.Tensor x:
+
+    Returns: torch.Tensor
+    """
+    # The series of casts and type-conversions here are carefully balanced to both work with ONNX export and XLA.
+    mask = input_ids.ne(padding_idx).int()
+    incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask) + past_key_values_length) * mask
+    return incremental_indices.long() + padding_idx
+
+
+class RobertaTableEmbeddings(RobertaEmbeddings):
+    def __init__(self, config):
+        super().__init__(config)
+        self.position_row_embeddings = nn.Embedding(config.max_num_rows + 1, config.hidden_size)
+        self.position_col_embeddings = nn.Embedding(config.max_num_cols + 1, config.hidden_size)
+
+    def forward(
+        self,
+        input_ids=None,
+        input_row_ids=None,
+        input_col_ids=None,
+        token_type_ids=None,
+        position_ids=None,
+        inputs_embeds=None,
+        past_key_values_length=0,
+    ):
+        if position_ids is None:
+            if input_ids is not None:
+                # Create the position ids from the input token ids. Any padded tokens remain padded.
+                position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx, past_key_values_length)
+            else:
+                position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
+
+        if input_ids is not None:
+            input_shape = input_ids.size()
+        else:
+            input_shape = inputs_embeds.size()[:-1]
+
+        seq_length = input_shape[1]
+
+        # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
+        # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
+        # issue #5664
+        if token_type_ids is None:
+            if hasattr(self, "token_type_ids"):
+                buffered_token_type_ids = self.token_type_ids[:, :seq_length]
+                buffered_token_type_ids_expanded = buffered_token_type_ids.expand(input_shape[0], seq_length)
+                token_type_ids = buffered_token_type_ids_expanded
+            else:
+                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+
+        if inputs_embeds is None:
+            inputs_embeds = self.word_embeddings(input_ids)
+
+        position_row_embeddings = self.position_row_embeddings(input_row_ids)
+        position_col_embeddings = self.position_row_embeddings(input_col_ids)
+
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        embeddings = inputs_embeds + token_type_embeddings + position_row_embeddings + position_col_embeddings
+        if self.position_embedding_type == "absolute":
+            position_embeddings = self.position_embeddings(position_ids)
+            embeddings += position_embeddings
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
+
+class BertTableEmbeddings(BertEmbeddings):
+    """Construct the embeddings from word, position and token_type embeddings."""
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.position_row_embeddings = nn.Embedding(config.max_num_rows + 1, config.hidden_size)
+        self.position_col_embeddings = nn.Embedding(config.max_num_cols + 1, config.hidden_size)
+
+    def forward(
+        self,
+        input_ids=None,
+        input_row_ids=None,
+        input_col_ids=None,
+        token_type_ids=None,
+        position_ids=None,
+        inputs_embeds=None,
+        past_key_values_length=0,
+    ):
+        if input_ids is not None:
+            input_shape = input_ids.size()
+        else:
+            input_shape = inputs_embeds.size()[:-1]
+
+        seq_length = input_shape[1]
+
+        if position_ids is None:
+            position_ids = self.position_ids[:, past_key_values_length : seq_length + past_key_values_length]
+
+        # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
+        # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
+        # issue #5664
+        if token_type_ids is None:
+            if hasattr(self, "token_type_ids"):
+                buffered_token_type_ids = self.token_type_ids[:, :seq_length]
+                buffered_token_type_ids_expanded = buffered_token_type_ids.expand(input_shape[0], seq_length)
+                token_type_ids = buffered_token_type_ids_expanded
+            else:
+                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+
+        if inputs_embeds is None:
+            inputs_embeds = self.word_embeddings(input_ids)
+
+        position_row_embeddings = self.position_row_embeddings(input_row_ids)
+        position_col_embeddings = self.position_row_embeddings(input_col_ids)
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        embeddings = inputs_embeds + token_type_embeddings + position_row_embeddings + position_col_embeddings
+        if self.position_embedding_type == "absolute":
+            position_embeddings = self.position_embeddings(position_ids)
+            embeddings += position_embeddings
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
+
+class LukeTableModel(nn.Module):
+    def __init__(self, config: LukeTableConfig):
         super().__init__()
 
         self.config = config
 
-        self.encoder = LukeEncoder(config)
+        self.encoder = LukeTableEncoder(config)
         self.pooler = BertPooler(config)
 
         if self.config.bert_model_name and "roberta" in self.config.bert_model_name:
-            self.embeddings = RobertaEmbeddings(config)
+            self.embeddings = RobertaTableEmbeddings(config)
             self.embeddings.token_type_embeddings.requires_grad = False
         else:
-            self.embeddings = BertEmbeddings(config)
-        self.entity_embeddings = EntityEmbeddings(config)
+            self.embeddings = BertTableEmbeddings(config)
+        self.entity_embeddings = TableEntityEmbeddings(config)
 
     def forward(
         self,
         word_ids: torch.LongTensor,
+        word_row_ids: torch.LongTensor,
+        word_col_ids: torch.LongTensor,
         word_segment_ids: torch.LongTensor,
         word_attention_mask: torch.LongTensor,
         entity_ids: torch.LongTensor = None,
         entity_position_ids: torch.LongTensor = None,
+        entity_position_row_ids: torch.LongTensor = None,
+        entity_position_col_ids: torch.LongTensor = None,
         entity_segment_ids: torch.LongTensor = None,
         entity_attention_mask: torch.LongTensor = None,
     ):
         word_seq_size = word_ids.size(1)
 
-        embedding_output = self.embeddings(word_ids, word_segment_ids)
+        embedding_output = self.embeddings(
+            input_ids=word_ids, input_row_ids=word_row_ids, input_col_ids=word_col_ids, token_type_ids=word_segment_ids
+        )
 
         attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask)
         if entity_ids is not None:
-            entity_embedding_output = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids)
+            entity_embedding_output = self.entity_embeddings(
+                entity_ids=entity_ids,
+                position_ids=entity_position_ids,
+                position_row_ids=entity_position_row_ids,
+                position_col_ids=entity_position_col_ids,
+                token_type_ids=entity_segment_ids,
+            )
             embedding_output = torch.cat([embedding_output, entity_embedding_output], dim=1)
 
         encoder_outputs = self.encoder(embedding_output, attention_mask)

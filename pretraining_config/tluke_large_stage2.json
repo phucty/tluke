@@ -4,7 +4,7 @@
   "optimizer": {
     "type": "AdamW",
     "params": {
-      "lr": 5e-4,
+      "lr": 5e-5,
       "betas": [
         0.9,
         0.999
@@ -18,11 +18,11 @@
     "type": "WarmupDecayLR",
     "params": {
       "warmup_min_lr": 0,
-      "warmup_max_lr": 5e-4,
-      "warmup_num_steps": 1000,
-      "total_num_steps": 5941,
+      "warmup_max_lr": 5e-5,
+      "warmup_num_steps": 2,
+      "total_num_steps": 73,
       "warmup_type": "linear"
     }
   },
-  "gradient_clipping": 1
+  "gradient_clipping": 1.0
 }

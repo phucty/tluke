@@ -1,0 +1,16 @@
+{
+  "train_batch_size": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "optimizer": {
+    "type": "AdamW",
+    "params": {
+      "lr": "auto",
+      "weight_decay": "auto",
+      "bias_correction": "auto"
+    }
+  },
+  "gradient_clipping": "auto",
+  "bfloat16": {
+    "enabled": true
+  }
+}

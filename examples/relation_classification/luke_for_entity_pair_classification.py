@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
+from transformers import LukeModel, LukePreTrainedModel
+from transformers.models.luke.modeling_luke import \
+    EntityPairClassificationOutput
 
-from transformers import LukePreTrainedModel, LukeModel
-from transformers.models.luke.modeling_luke import EntityPairClassificationOutput
 
 # temporary use this implementation until this gets merged into transformers
-class LukeForEntityPairClassification(LukePreTrainedModel):
+class  (LukePreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
