@@ -470,8 +470,8 @@ class LukeTablePretrainingBatchWorker(LukePretrainingBatchWorker):
                     entity_position_col_ids=item["entity_position_col_ids"],
                 )
                 max_entity_len = max(max_entity_len, item["entity_ids"].size)
-                max_entity_hor_len = max(max_entity_hor_len, entity_feat["ent_hor_rel_len"])
-                max_entity_ver_len = max(max_entity_ver_len, entity_feat["ent_ver_rel_len"])
+                max_entity_hor_len = max(max_entity_hor_len, entity_feat["entity_hor_rel_len"])
+                max_entity_ver_len = max(max_entity_ver_len, entity_feat["entity_ver_rel_len"])
             else:
                 entity_feat = None
                 masked_entity_positions = []
@@ -542,12 +542,12 @@ class LukeTablePretrainingBatchWorker(LukePretrainingBatchWorker):
                 if not self._word_only:
                     entity_keys = buf[0].entity_features.keys()
                     entity_rels_keys = {
-                        "ent_hor_rel_positions",
-                        "ent_hor_rel_labels",
-                        "ent_hor_rel_len",
-                        "ent_ver_rel_positions",
-                        "ent_ver_rel_labels",
-                        "ent_ver_rel_len",
+                        "entity_hor_rel_positions",
+                        "entity_hor_rel_labels",
+                        "entity_hor_rel_len",
+                        "entity_ver_rel_positions",
+                        "entity_ver_rel_labels",
+                        "entity_ver_rel_len",
                     }
                     batch.update(
                         {
@@ -559,29 +559,29 @@ class LukeTablePretrainingBatchWorker(LukePretrainingBatchWorker):
 
                     batch.update(
                         {
-                            "ent_hor_rel_positions": np.stack(
-                                [o.entity_features["ent_hor_rel_positions"][:max_entity_hor_len] for o in buf]
+                            "entity_hor_rel_positions": np.stack(
+                                [o.entity_features["entity_hor_rel_positions"][:max_entity_hor_len] for o in buf]
                             )
                         }
                     )
                     batch.update(
                         {
-                            "ent_hor_rel_labels": np.stack(
-                                [o.entity_features["ent_hor_rel_labels"][:max_entity_hor_len] for o in buf]
+                            "entity_hor_rel_labels": np.stack(
+                                [o.entity_features["entity_hor_rel_labels"][:max_entity_hor_len] for o in buf]
                             )
                         }
                     )
                     batch.update(
                         {
-                            "ent_ver_rel_positions": np.stack(
-                                [o.entity_features["ent_ver_rel_positions"][:max_entity_ver_len] for o in buf]
+                            "entity_ver_rel_positions": np.stack(
+                                [o.entity_features["entity_ver_rel_positions"][:max_entity_ver_len] for o in buf]
                             )
                         }
                     )
                     batch.update(
                         {
-                            "ent_ver_rel_labels": np.stack(
-                                [o.entity_features["ent_ver_rel_labels"][:max_entity_ver_len] for o in buf]
+                            "entity_ver_rel_labels": np.stack(
+                                [o.entity_features["entity_ver_rel_labels"][:max_entity_ver_len] for o in buf]
                             )
                         }
                     )
@@ -774,12 +774,12 @@ class LukeTablePretrainingBatchWorker(LukePretrainingBatchWorker):
             output_ver_rel_positions[: len(ver_rel_positions)] = ver_rel_positions
             output_ver_rel_labels[: len(ver_rel_labels)] = ver_rel_labels
 
-        ret["ent_hor_rel_positions"] = output_hor_rel_positions
-        ret["ent_hor_rel_labels"] = output_hor_rel_labels
-        ret["ent_hor_rel_len"] = len(hor_rel_labels)
-        ret["ent_ver_rel_positions"] = output_ver_rel_positions
-        ret["ent_ver_rel_labels"] = output_ver_rel_labels
-        ret["ent_ver_rel_len"] = len(ver_rel_labels)
+        ret["entity_hor_rel_positions"] = output_hor_rel_positions
+        ret["entity_hor_rel_labels"] = output_hor_rel_labels
+        ret["entity_hor_rel_len"] = len(hor_rel_labels)
+        ret["entity_ver_rel_positions"] = output_ver_rel_positions
+        ret["entity_ver_rel_labels"] = output_ver_rel_labels
+        ret["entity_ver_rel_len"] = len(ver_rel_labels)
         return ret, masked_positions
 
     def _create_cell_positions_from_col_row_index(self, position_row_ids, position_col_ids, max_length, masked_prob):
@@ -793,7 +793,7 @@ class LukeTablePretrainingBatchWorker(LukePretrainingBatchWorker):
             cols[position_col_ids[i]].add(position_row_ids[i])
 
         # x2 (postive sample and negative sample)
-        # x5 samples
+        # x8 samples
         num_to_predict = max(1, int(round(len(rows) * masked_prob * 2 * 8)))
 
         def is_valid_cell(row_i, col_i):

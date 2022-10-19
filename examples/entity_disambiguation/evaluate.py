@@ -4,13 +4,12 @@ from typing import List, Optional
 
 import click
 import torch
+from examples.entity_disambiguation.dataloader import create_dataloader
+from examples.entity_disambiguation.dataset import load_dataset
+from examples.entity_disambiguation.model import LukeForEntityDisambiguation, TLukeForEntityDisambiguation
 from luke.utils.entity_vocab import MASK_TOKEN, PAD_TOKEN, EntityVocab
 from tqdm import tqdm
 from transformers import AutoTokenizer
-
-from dataloader import create_dataloader
-from dataset import load_dataset
-from model import LukeForEntityDisambiguation
 
 logger = logging.getLogger(__name__)
 # import debugpy
@@ -49,6 +48,7 @@ logger = logging.getLogger(__name__)
     type=click.Choice(["simple", "per_mention"]),
     default="simple",
 )
+@click.option("--use-tluke", is_flag=True)
 def evaluate(
     model_dir: str,
     dataset_dir: str,
@@ -63,12 +63,17 @@ def evaluate(
     max_mention_length: int,
     inference_mode: str,
     document_split_mode: str,
+    use_tluke: bool,
 ):
-    model = LukeForEntityDisambiguation.from_pretrained(model_dir).eval()
+    if use_tluke:
+        model = TLukeForEntityDisambiguation.from_pretrained(model_dir).eval()
+    else:
+        model = LukeForEntityDisambiguation.from_pretrained(model_dir).eval()
+    print(f"Loaded: {model_dir}")
     model.to(device)
+
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    entity_vocab_path = os.path.join(model_dir, "entity_vocab.jsonl")
-    entity_vocab = EntityVocab(entity_vocab_path)
+    entity_vocab = EntityVocab(os.path.join(model_dir, "entity_vocab.jsonl"))
     pad_entity_id = entity_vocab[PAD_TOKEN]
     mask_entity_id = entity_vocab[MASK_TOKEN]
     dataset = load_dataset(
@@ -77,7 +82,7 @@ def evaluate(
         redirects_file=redirects_file,
         ppr_for_ned_dir=ppr_for_ned_dir,
     )
-
+    stats = []
     for dataset_name in test_set:
         print(f"========== Dataset: {dataset_name} ==========")
         documents = dataset.get_dataset(dataset_name)
@@ -155,6 +160,9 @@ def evaluate(
         recall = num_correct / num_mentions
         f1 = 2.0 * precision * recall / (precision + recall)
         print(f"F1: {f1:.3f}  Precision: {precision:.3f}  Recall: {recall:.3f}")
+        stats.append([dataset_name, f1])
+    print("\t".join([dataset_name for dataset_name, _ in stats]))
+    print("\t".join([f"{f1:.3f}" for _, f1 in stats]))
 
 
 if __name__ == "__main__":

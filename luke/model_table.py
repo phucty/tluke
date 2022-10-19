@@ -109,8 +109,20 @@ class LukeTableEncoder(nn.Module):
         self.output_hidden_states = config.output_hidden_states
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states, attention_mask=None):
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        return_dict=True,
+    ):
         all_hidden_states = ()
+        all_word_hidden_states = () if output_hidden_states else None
+        all_entity_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
+
         for i, layer_module in enumerate(self.layer):
             if self.output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
@@ -171,6 +183,11 @@ class RobertaTableEmbeddings(RobertaEmbeddings):
         else:
             input_shape = inputs_embeds.size()[:-1]
 
+        if input_col_ids is None:
+            input_col_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+        if input_row_ids is None:
+            input_row_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+
         seq_length = input_shape[1]
 
         # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
@@ -228,6 +245,10 @@ class BertTableEmbeddings(BertEmbeddings):
 
         if position_ids is None:
             position_ids = self.position_ids[:, past_key_values_length : seq_length + past_key_values_length]
+        if input_col_ids is None:
+            input_col_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+        if input_row_ids is None:
+            input_row_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
 
         # Setting the token_type_ids to the registered buffer in constructor where it is all zeros, which usually occurs
         # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
@@ -272,22 +293,50 @@ class LukeTableModel(nn.Module):
             self.embeddings = BertTableEmbeddings(config)
         self.entity_embeddings = TableEntityEmbeddings(config)
 
+    def get_input_embeddings(self):
+        return self.embeddings.word_embeddings
+
+    def set_input_embeddings(self, value):
+        self.embeddings.word_embeddings = value
+
+    def get_entity_embeddings(self):
+        return self.entity_embeddings.entity_embeddings
+
+    def set_entity_embeddings(self, value):
+        self.entity_embeddings.entity_embeddings = value
+
+    def _prune_heads(self, heads_to_prune):
+        raise NotImplementedError("LUKE does not support the pruning of attention heads")
+
     def forward(
         self,
         word_ids: torch.LongTensor,
-        word_row_ids: torch.LongTensor,
-        word_col_ids: torch.LongTensor,
-        word_segment_ids: torch.LongTensor,
-        word_attention_mask: torch.LongTensor,
+        word_row_ids: torch.LongTensor = None,
+        word_col_ids: torch.LongTensor = None,
+        word_segment_ids: torch.LongTensor = None,
+        word_attention_mask: torch.LongTensor = None,
+        word_position_ids: torch.LongTensor = None,
         entity_ids: torch.LongTensor = None,
         entity_position_ids: torch.LongTensor = None,
         entity_position_row_ids: torch.LongTensor = None,
         entity_position_col_ids: torch.LongTensor = None,
         entity_segment_ids: torch.LongTensor = None,
         entity_attention_mask: torch.LongTensor = None,
+        head_mask=None,
+        inputs_embeds=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
     ):
-        word_seq_size = word_ids.size(1)
+        # output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        # output_hidden_states = (
+        #     output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        # )
+        # return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        # head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
+
+        word_seq_size = word_ids.size(1)
         embedding_output = self.embeddings(
             input_ids=word_ids, input_row_ids=word_row_ids, input_col_ids=word_col_ids, token_type_ids=word_segment_ids
         )
@@ -304,6 +353,7 @@ class LukeTableModel(nn.Module):
             embedding_output = torch.cat([embedding_output, entity_embedding_output], dim=1)
 
         encoder_outputs = self.encoder(embedding_output, attention_mask)
+
         sequence_output = encoder_outputs[0]
         word_sequence_output = sequence_output[:, :word_seq_size, :]
         pooled_output = self.pooler(sequence_output)

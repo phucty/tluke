@@ -5,10 +5,15 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers.models.bert.modeling_bert import (BertConfig, BertEmbeddings,
-                                                    BertIntermediate,
-                                                    BertLayer, BertOutput,
-                                                    BertPooler, BertSelfOutput)
+from transformers.models.bert.modeling_bert import (
+    BertConfig,
+    BertEmbeddings,
+    BertIntermediate,
+    BertLayer,
+    BertOutput,
+    BertPooler,
+    BertSelfOutput,
+)
 from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
 
 logger = logging.getLogger(__name__)
@@ -17,9 +22,9 @@ logger = logging.getLogger(__name__)
 class LukeConfig(BertConfig):
     def __init__(
         self,
-        vocab_size: int,
-        entity_vocab_size: int,
-        bert_model_name: str,
+        vocab_size: int = None,
+        entity_vocab_size: int = None,
+        bert_model_name: str = None,
         entity_emb_size: int = None,
         cls_entity_prediction: bool = False,
         **kwargs,
@@ -101,6 +106,7 @@ class LukeEncoder(nn.Module):
         if self.output_hidden_states:
             outputs = outputs + (all_hidden_states,)
         return outputs
+
 
 class LukeModel(nn.Module):
     def __init__(self, config: LukeConfig):

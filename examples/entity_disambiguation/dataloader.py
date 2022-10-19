@@ -3,12 +3,10 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from examples.entity_disambiguation.dataset import Document, Mention
+from luke.utils.entity_vocab import PAD_TOKEN, UNK_TOKEN, EntityVocab
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
-
-from luke.utils.entity_vocab import EntityVocab, PAD_TOKEN, UNK_TOKEN
-
-from dataset import Document, Mention
 
 
 def create_dataloader(

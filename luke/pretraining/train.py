@@ -18,7 +18,9 @@ from luke.model import LukeConfig
 from luke.model_table import LukeTableConfig
 from luke.pretraining.batch_generator import LukePretrainingBatchGenerator
 from luke.pretraining.dataset import WikipediaPretrainingDataset
-from luke.pretraining.model import LukePretrainingModel, LukeTablePretrainingModel
+from luke.pretraining.model import (LukePretrainingModel,
+                                    LukeTablePretrainingModel)
+from luke.utils.entity_vocab import EntityVocab
 from luke.utils.model_utils import ENTITY_VOCAB_FILE
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -27,6 +29,13 @@ from transformers import AutoConfig, AutoModelForPreTraining
 METADATA_FILE = "metadata.json"
 
 logger = None
+
+# import debugpy
+
+# debugpy.listen(5678)
+# print("Wait for client")
+# debugpy.wait_for_client()
+# print("Attached")
 
 
 def save_checkpoint(
@@ -41,10 +50,39 @@ def save_checkpoint(
 
 
 def load_checkpoint(
-    path: str, checkpoint_id: str, model: Union[LukePretrainingModel, LukeTablePretrainingModel], **kwargs
+    path: str,
+    checkpoint_id: str,
+    model: Union[LukePretrainingModel, LukeTablePretrainingModel],
+    entity_vocab=None,
+    config=None,
+    **kwargs,
 ):
     if checkpoint_id.endswith(".bin") or checkpoint_id.endswith(".pt"):
         model_weights = torch.load(os.path.join(path, checkpoint_id), map_location="cpu")
+        if "module" in model_weights:
+            model_weights = model_weights["module"]
+        if entity_vocab:
+            orig_entity_vocab = EntityVocab(os.path.join(path, "entity_vocab.jsonl"))
+            if "luke.entity_embeddings.entity_embeddings.weight" in model_weights:
+                orig_entity_emb = model_weights["luke.entity_embeddings.entity_embeddings.weight"]
+            else:
+                orig_entity_emb = model_weights["entity_embeddings.entity_embeddings.weight"]
+            if orig_entity_emb.size(0) != len(entity_vocab):  # detect whether the model is fine-tuned
+                entity_emb = orig_entity_emb.new_zeros((entity_vocab.size, config.hidden_size))
+                orig_entity_bias = model_weights["entity_predictions.bias"]
+                entity_bias = orig_entity_bias.new_zeros(entity_vocab.size)
+                for entity, index in entity_vocab.vocab.items():
+                    if entity.title in orig_entity_vocab:
+                        orig_index = orig_entity_vocab[entity.title]
+                        entity_emb[index] = orig_entity_emb[orig_index]
+                        entity_bias[index] = orig_entity_bias[orig_index]
+                model_weights["entity_embeddings.entity_embeddings.weight"] = entity_emb
+                model_weights["entity_embeddings.mask_embedding"] = entity_emb[1].view(1, -1)
+                model_weights["entity_predictions.decoder.weight"] = entity_emb
+                model_weights["entity_predictions.bias"] = entity_bias
+                del orig_entity_bias, entity_emb, entity_bias
+            del orig_entity_emb
+
         model.load_state_dict(model_weights, strict=False)
         epoch, global_step = 0, 0
     else:
@@ -103,6 +141,22 @@ def create_table_model_and_config(
         for param in model.entity_embeddings.parameters():
             param.requires_grad = True
         for param in model.entity_predictions.parameters():
+            param.requires_grad = True
+
+        # Add relationship prediction parameters
+        for param in model.entity_hor_rel_predictions.parameters():
+            param.requires_grad = True
+        for param in model.entity_ver_rel_predictions.parameters():
+            param.requires_grad = True
+        for param in model.word_hor_rel_predictions.parameters():
+            param.requires_grad = True
+        for param in model.word_ver_rel_predictions.parameters():
+            param.requires_grad = True
+
+        # col and row embeddings
+        for param in model.embeddings.position_row_embeddings.parameters():
+            param.requires_grad = True
+        for param in model.embeddings.position_col_embeddings.parameters():
             param.requires_grad = True
 
     if args.word_only_training:
@@ -244,12 +298,6 @@ def compute_total_training_steps(dataset_dir, train_batch_size, num_epochs):
 @click.option("--from-tables", is_flag=True)
 @click.option("--learn-relations", is_flag=True)
 def pretrain(**kwargs):
-    # import debugpy
-
-    # debugpy.listen(5678)
-    # print("Wait for client")
-    # debugpy.wait_for_client()
-    # print("Attached")
     global logger
 
     import deepspeed
@@ -341,6 +389,8 @@ def pretrain(**kwargs):
                 target_checkpoint_dir,
                 target_checkpoint_id,
                 model,
+                entity_vocab=entity_vocab,
+                config=config,
                 load_module_strict=load_module_strict,
                 load_optimizer_states=False,
                 load_lr_scheduler_states=False,
@@ -350,6 +400,8 @@ def pretrain(**kwargs):
                 target_checkpoint_dir,
                 target_checkpoint_id,
                 model,
+                entity_vocab=entity_vocab,
+                config=config,
                 load_optimizer_states=True,
                 load_lr_scheduler_states=True,
             )
@@ -442,8 +494,8 @@ def pretrain(**kwargs):
             if global_step == num_train_steps:
                 save_checkpoint(checkpoint_dir, f"epoch{args.num_epochs}", model, args.num_epochs, global_step)
 
-            elif global_step % num_train_steps_per_epoch == 0:
-                save_checkpoint(checkpoint_dir, f"epoch{current_epoch}", model, current_epoch, global_step)
+            # elif global_step % num_train_steps_per_epoch == 0:
+            # save_checkpoint(checkpoint_dir, f"epoch{current_epoch}", model, current_epoch, global_step)
 
             if args.save_interval_steps and global_step % args.save_interval_steps == 0:
                 save_checkpoint(checkpoint_dir, f"step{global_step:07}", model, current_epoch, global_step)

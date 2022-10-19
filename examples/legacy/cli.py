@@ -12,10 +12,10 @@ logging.getLogger("transformers").setLevel(logging.WARNING)
 
 import click
 import torch
-
 from luke.utils.model_utils import ModelArchive
 
-from .utils.experiment_logger import commet_logger_args, CometLogger, NullLogger
+from .utils.experiment_logger import (CometLogger, NullLogger,
+                                      commet_logger_args)
 
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(message)s (%(funcName)s@%(filename)s:%(lineno)s)"
 
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 @click.group()
 @click.option(
-    "--output-dir", default="exp_" + "".join(random.choice(string.ascii_letters) for m in range(8)), type=click.Path()
+    "--output-dir", default="exp/exp_" + "".join(random.choice(string.ascii_letters) for m in range(8)), type=click.Path()
 )
 @click.option("--num-gpus", default=1)
 @click.option("--experiment-logger", "--logger", type=click.Choice(["comet"]))

@@ -1,14 +1,12 @@
-import click
 import json
 import os
 from collections import OrderedDict
 
+import click
 import torch
-from transformers import LukeConfig, AutoTokenizer
-
 from luke.utils.entity_vocab import EntityVocab
-
 from model import LukeForEntityDisambiguation
+from transformers import AutoTokenizer, LukeConfig
 
 
 @click.command
@@ -23,7 +21,10 @@ def convert_checkpoint(checkpoint_file, metadata_file, entity_vocab_file, output
     if "pad_token_id" not in metadata["model_config"]:
         metadata["model_config"]["pad_token_id"] = 0
 
-    config = LukeConfig(use_entity_aware_attention=False, **metadata["model_config"],)
+    config = LukeConfig(
+        use_entity_aware_attention=False,
+        **metadata["model_config"],
+    )
     model = LukeForEntityDisambiguation(config=config).eval()
 
     state_dict = torch.load(checkpoint_file, map_location="cpu")

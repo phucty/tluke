@@ -19,8 +19,8 @@
     "params": {
       "warmup_min_lr": 0,
       "warmup_max_lr": 5e-4,
-      "warmup_num_steps": 2,
-      "total_num_steps": 13,
+      "warmup_num_steps": 0,
+      "total_num_steps": 73,
       "warmup_type": "linear"
     }
   },

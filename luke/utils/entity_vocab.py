@@ -113,14 +113,13 @@ class EntityVocab:
 
     def _parse_jsonl_vocab_file(self, vocab_file: str):
         with open(vocab_file, "r") as f:
-            entities_json = [json.loads(line) for line in f]
-
-        for item in entities_json:
-            for title, language in item["entities"]:
-                entity = Entity(title, language)
-                self.vocab[entity] = item["id"]
-                self.counter[entity] = item["count"]
-                self.inv_vocab[item["id"]].append(entity)
+            for line in f:
+                item = json.loads(line)
+                for title, language in item["entities"]:
+                    entity = Entity(title, language)
+                    self.vocab[entity] = item["id"]
+                    self.counter[entity] = item["count"]
+                    self.inv_vocab[item["id"]].append(entity)
 
     @property
     def size(self) -> int:
@@ -133,29 +132,35 @@ class EntityVocab:
         return len(self.inv_vocab)
 
     def __contains__(self, item: str):
-        return self.contains(item, language=None)
+        obj = self.contains(item, language="en")
+        if obj is None:
+            obj = self.contains(item, language=None)
+        return obj
 
     def __getitem__(self, key: str):
-        return self.get_id(key, language=None)
+        obj = self.get_id(key, language="en")
+        if obj is None:
+            obj = self.get_id(key, language=None)
+        return obj
 
     def __iter__(self):
         return iter(self.vocab)
 
-    def contains(self, title: str, language: str = None):
+    def contains(self, title: str, language: str = "en"):
         return Entity(title, language) in self.vocab
 
-    def get_id(self, title: str, language: str = None, default: int = None) -> int:
+    def get_id(self, title: str, language: str = "en", default: int = None) -> int:
         try:
             return self.vocab[Entity(title, language)]
         except KeyError:
             return default
 
-    def get_title_by_id(self, id_: int, language: str = None) -> str:
+    def get_title_by_id(self, id_: int, language: str = "en") -> str:
         for entity in self.inv_vocab[id_]:
             if entity.language == language:
                 return entity.title
 
-    def get_count_by_title(self, title: str, language: str = None) -> int:
+    def get_count_by_title(self, title: str, language: str = "en") -> int:
         entity = Entity(title, language)
         return self.counter.get(entity, 0)
 
@@ -192,7 +197,7 @@ class EntityVocab:
         pool_size: int,
         chunk_size: int,
         language: str,
-        get_vocab_from_tables: bool=False,
+        get_vocab_from_tables: bool = False,
     ):
         counter = Counter()
         if get_vocab_from_tables:

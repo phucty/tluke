@@ -1,10 +1,11 @@
 from typing import Dict, Optional
 
 import torch
-from luke.model import LukeConfig, LukeModel
+from luke.model import LukeConfig, LukeEncoder, LukeModel
 from luke.model_table import LukeTableConfig, LukeTableModel
 from luke.pretraining.metrics import Accuracy, Average
 from torch import nn
+from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.models.bert.modeling_bert import BertPreTrainingHeads
 from transformers.models.luke.modeling_luke import EntityPredictionHead
@@ -158,9 +159,9 @@ class CellEmbeddingHeadTransform(nn.Module):
         return hidden_states
 
 
-class EntityHorRelPredictionHead(LukeTableModel):
+class EntityHorRelPredictionHead(nn.Module):
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
         self.config = config
         self.transform = CellEmbeddingHeadTransform(config)
         # 4 cells, --> 2: Is same relationship or not
@@ -174,9 +175,9 @@ class EntityHorRelPredictionHead(LukeTableModel):
         return hidden_states
 
 
-class EntityVerRelPredictionHead(LukeTableModel):
+class EntityVerRelPredictionHead(nn.Module):
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
         self.config = config
         self.transform = CellEmbeddingHeadTransform(config)
         # 4 cells, --> 2: Is same relationship or not
@@ -190,9 +191,9 @@ class EntityVerRelPredictionHead(LukeTableModel):
         return hidden_states
 
 
-class WordHorRelPredictionHead(LukeTableModel):
+class WordHorRelPredictionHead(nn.Module):
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
         self.config = config
         self.transform = CellEmbeddingHeadTransform(config)
         # 4 cells, --> 2: Is same relationship or not
@@ -206,9 +207,9 @@ class WordHorRelPredictionHead(LukeTableModel):
         return hidden_states
 
 
-class WordVerRelPredictionHead(LukeTableModel):
+class WordVerRelPredictionHead(nn.Module):
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
         self.config = config
         self.transform = CellEmbeddingHeadTransform(config)
         # 4 cells, --> 2: Is same relationship or not
@@ -236,8 +237,8 @@ class LukeTablePretrainingModel(LukeTableModel):
         self.entity_predictions = EntityPredictionHead(config)
         self.entity_predictions.decoder.weight = self.entity_embeddings.entity_embeddings.weight
 
-        self.ent_hor_rel_predictions = EntityHorRelPredictionHead(config)
-        self.ent_ver_rel_predictions = EntityVerRelPredictionHead(config)
+        self.entity_hor_rel_predictions = EntityHorRelPredictionHead(config)
+        self.entity_ver_rel_predictions = EntityVerRelPredictionHead(config)
 
         self.word_hor_rel_predictions = WordHorRelPredictionHead(config)
         self.word_ver_rel_predictions = WordVerRelPredictionHead(config)
@@ -256,12 +257,10 @@ class LukeTablePretrainingModel(LukeTableModel):
             "masked_entity_loss": Average(),
             "masked_entity_accuracy": Accuracy(),
             "entity_prediction_loss": Average(),
-            "relationship_accuracy": Accuracy(),
-            "relationship_loss": Average(),
-            "ent_ver_rel_loss": Average(),
-            "ent_ver_rel_acc": Accuracy(),
-            "ent_hor_rel_loss": Average(),
-            "ent_hor_rel_acc": Accuracy(),
+            "entity_ver_rel_loss": Average(),
+            "entity_ver_rel_acc": Accuracy(),
+            "entity_hor_rel_loss": Average(),
+            "entity_hor_rel_acc": Accuracy(),
             "word_ver_rel_loss": Average(),
             "word_ver_rel_acc": Accuracy(),
             "word_hor_rel_loss": Average(),
@@ -284,10 +283,10 @@ class LukeTablePretrainingModel(LukeTableModel):
         masked_entity_labels: Optional[torch.LongTensor] = None,
         masked_lm_labels: Optional[torch.LongTensor] = None,
         page_id: torch.LongTensor = None,
-        ent_hor_rel_positions: torch.LongTensor = None,
-        ent_hor_rel_labels: torch.LongTensor = None,
-        ent_ver_rel_positions: torch.LongTensor = None,
-        ent_ver_rel_labels: torch.LongTensor = None,
+        entity_hor_rel_positions: torch.LongTensor = None,
+        entity_hor_rel_labels: torch.LongTensor = None,
+        entity_ver_rel_positions: torch.LongTensor = None,
+        entity_ver_rel_labels: torch.LongTensor = None,
         word_hor_rel_positions: torch.LongTensor = None,
         word_hor_rel_labels: torch.LongTensor = None,
         word_ver_rel_positions: torch.LongTensor = None,
@@ -355,10 +354,10 @@ class LukeTablePretrainingModel(LukeTableModel):
                 )
                 ret["loss"] += masked_lm_loss
 
-        if ent_hor_rel_labels is not None:
-            mask_labels = ent_hor_rel_labels != -1
+        if entity_hor_rel_labels is not None:
+            mask_labels = entity_hor_rel_labels != -1
             if mask_labels.sum() > 0:
-                target_labels = torch.masked_select(ent_hor_rel_labels, mask_labels)
+                target_labels = torch.masked_select(entity_hor_rel_labels, mask_labels)
                 # dk: number of valid samples (relationship)
                 dk = target_labels.size(0)
 
@@ -369,27 +368,27 @@ class LukeTablePretrainingModel(LukeTableModel):
                 # de: number of samples
                 # dc: number of cells (fixed number = 4 cells)
                 # dm: max number of tokens in one cell (fixed number = 30)
-                db, de, dc, dm = ent_hor_rel_positions.shape
+                db, de, dc, dm = entity_hor_rel_positions.shape
 
-                I_mask = (ent_hor_rel_positions != -1).type_as(entity_sequence_output)
+                I_mask = (entity_hor_rel_positions != -1).type_as(entity_sequence_output)
                 I_mask_sum = I_mask.sum(dim=-1).unsqueeze(-1)
                 if (I_mask_sum != 0).sum() / dc == dk:
-                    I2 = ent_hor_rel_positions.clamp(min=0).view(db, -1, 1).expand(db, de * dc * dm, dh)
+                    I2 = entity_hor_rel_positions.clamp(min=0).view(db, -1, 1).expand(db, de * dc * dm, dh)
                     cell_hiddens = (torch.gather(entity_sequence_output, 1, I2) * I_mask.view(db, -1, 1)).view(
                         db, de, dc, dm, dh
                     ).sum(dim=-2) / I_mask_sum.clamp(min=1)
                     cell_hiddens = torch.masked_select(cell_hiddens, I_mask_sum.expand(db, de, dc, dh) != 0)
                     cell_hiddens = cell_hiddens.view(-1, dc, dh)
-                    scores = self.ent_hor_rel_predictions(cell_hiddens)
-                    ent_hor_rel_loss = self.loss_fn(scores, target_labels)
-                    self.metrics["ent_hor_rel_loss"](ent_hor_rel_loss)
-                    self.metrics["ent_hor_rel_acc"](prediction=torch.argmax(scores, dim=1), target=target_labels)
-                    ret["loss"] += ent_hor_rel_loss
+                    scores = self.entity_hor_rel_predictions(cell_hiddens)
+                    entity_hor_rel_loss = self.loss_fn(scores, target_labels)
+                    self.metrics["entity_hor_rel_loss"](entity_hor_rel_loss)
+                    self.metrics["entity_hor_rel_acc"](prediction=torch.argmax(scores, dim=1), target=target_labels)
+                    ret["loss"] += entity_hor_rel_loss
 
-        if ent_ver_rel_labels is not None:
-            mask_labels = ent_ver_rel_labels != -1
+        if entity_ver_rel_labels is not None:
+            mask_labels = entity_ver_rel_labels != -1
             if mask_labels.sum() > 0:
-                target_labels = torch.masked_select(ent_ver_rel_labels, mask_labels)
+                target_labels = torch.masked_select(entity_ver_rel_labels, mask_labels)
                 # dk: number of valid samples (relationship)
                 dk = target_labels.size(0)
                 # db: batch size
@@ -399,23 +398,23 @@ class LukeTablePretrainingModel(LukeTableModel):
                 # de: number of samples
                 # dc: number of cells (fixed number = 4 cells)
                 # dm: max number of tokens in one cell (fixed number = 30)
-                db, de, dc, dm = ent_ver_rel_positions.shape
+                db, de, dc, dm = entity_ver_rel_positions.shape
 
-                I_mask = (ent_ver_rel_positions != -1).type_as(entity_sequence_output)
+                I_mask = (entity_ver_rel_positions != -1).type_as(entity_sequence_output)
                 I_mask_sum = I_mask.sum(dim=-1).unsqueeze(-1)
 
                 if (I_mask_sum != 0).sum() / dc == dk:
-                    I2 = ent_ver_rel_positions.clamp(min=0).view(db, -1, 1).expand(db, de * dc * dm, dh)
+                    I2 = entity_ver_rel_positions.clamp(min=0).view(db, -1, 1).expand(db, de * dc * dm, dh)
                     cell_hiddens = (torch.gather(entity_sequence_output, 1, I2) * I_mask.view(db, -1, 1)).view(
                         db, de, dc, dm, dh
                     ).sum(dim=-2) / I_mask_sum.clamp(min=1)
                     cell_hiddens = torch.masked_select(cell_hiddens, I_mask_sum.expand(db, de, dc, dh) != 0)
                     cell_hiddens = cell_hiddens.view(-1, dc, dh)
-                    scores = self.ent_ver_rel_predictions(cell_hiddens)
-                    ent_ver_rel_loss = self.loss_fn(scores, target_labels)
-                    self.metrics["ent_ver_rel_loss"](ent_ver_rel_loss)
-                    self.metrics["ent_ver_rel_acc"](prediction=torch.argmax(scores, dim=1), target=target_labels)
-                    ret["loss"] += ent_ver_rel_loss
+                    scores = self.entity_ver_rel_predictions(cell_hiddens)
+                    entity_ver_rel_loss = self.loss_fn(scores, target_labels)
+                    self.metrics["entity_ver_rel_loss"](entity_ver_rel_loss)
+                    self.metrics["entity_ver_rel_acc"](prediction=torch.argmax(scores, dim=1), target=target_labels)
+                    ret["loss"] += entity_ver_rel_loss
 
         if word_hor_rel_labels is not None:
             mask_labels = word_hor_rel_labels != -1
@@ -495,3 +494,35 @@ class LukeTablePretrainingModel(LukeTableModel):
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {k: m.get_metric(reset=reset) for k, m in self.metrics.items()}
+
+
+class TLukePreTrainedModel(PreTrainedModel):
+    """
+    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
+    models.
+    """
+
+    config_class = LukeTableConfig
+    base_model_prefix = "tluke"
+    supports_gradient_checkpointing = True
+
+    def _init_weights(self, module: nn.Module):
+        """Initialize the weights"""
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            if module.embedding_dim == 1:  # embedding for bias parameters
+                module.weight.data.zero_()
+            else:
+                module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def _set_gradient_checkpointing(self, module, value=False):
+        if isinstance(module, LukeEncoder):
+            module.gradient_checkpointing = value
