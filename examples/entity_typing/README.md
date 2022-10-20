@@ -52,4 +52,3 @@ allennlp predict RESULT_SAVE_DIR INPUT_FILE --use-dataset-reader --include-packa
 # example of LUKE
 allennlp predict results/entity_typing/luke-large data/ultrafine_acl18/crowd/dev.json --use-dataset-reader --include-package examples --cuda-device 0 --output-file results/entity_typing/luke-large/prediction.json
 ```
-

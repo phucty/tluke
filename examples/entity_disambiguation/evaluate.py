@@ -104,6 +104,8 @@ def evaluate(
             inputs = {k: v.to(device) for k, v in input_dict.items()}
             entity_ids = inputs.pop("entity_ids")
             entity_length = inputs["entity_attention_mask"].sum()
+            if not entity_length:
+                continue
             input_entity_ids = entity_ids.new_full(entity_ids.size(), pad_entity_id)
             input_entity_ids[0, :entity_length] = mask_entity_id
             eval_entity_mask = inputs.pop("eval_entity_mask")

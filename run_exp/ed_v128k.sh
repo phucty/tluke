@@ -1,4 +1,4 @@
-VOCAB=1k
+VOCAB=128k
 DATA="data/tluke_pretraining_bert_large_${VOCAB}/"
 GPUS=4
 PRETRAIN=models/tluke_bert_large
@@ -60,8 +60,8 @@ python examples/entity_disambiguation/train.py \
 
 
 python examples/entity_disambiguation/evaluate.py \
-  --model-dir=$ED \
-  --dataset-dir=data/entity_disambiguation/ \
+  --model-dir=models/tluke_ed_large/ \
+  --dataset-dir=$ED \
   --titles-file=data/entity_disambiguation/enwiki_20181220_titles.txt \
   --redirects-file=data/entity_disambiguation/enwiki_20181220_redirects.tsv \
   --inference-mode=local \
