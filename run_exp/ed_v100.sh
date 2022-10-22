@@ -11,10 +11,12 @@ PRETRAIN_INIT=models/luke_ed_large/pytorch_model.bin
 PRETRAIN_STAGE1="${PRETRAIN}/checkpoints/epoch${EPOCH1}"
 PRETRAIN_STAGE2="${PRETRAIN}/checkpoints/epoch${EPOCH2}/mp_rank_00_model_states.pt"
 PRETRAIN_METADATA="${PRETRAIN}/metadata.json"
+PRETRAIN_VOCAB="${PRETRAIN}/entity_vocab.jsonl"
 
 ED=models/tluke_ed_large/
 ED_MODEL="${ED}pytorch_model.bin"
 ED_METADATA="${ED}metadata.json"
+ED_VOCAB="${ED}/entity_vocab.jsonl"
 
 
 deepspeed \
@@ -47,8 +49,12 @@ deepspeed \
     --from-tables \
     --resume-checkpoint-id=$PRETRAIN_STAGE1
 
-mv $PRETRAIN_STAGE2 $ED_MODEL
+echo $PRETRAIN_STAGE2 $ED_MODEL
+echo $PRETRAIN_METADATA $ED_METADATA
+echo $PRETRAIN_VOCAB $ED_VOCAB
+cp $PRETRAIN_STAGE2 $ED_MODEL
 cp $PRETRAIN_METADATA $ED_METADATA
+cp $PRETRAIN_VOCAB $ED_VOCAB
 
 python examples/entity_disambiguation/train.py \
   --model-dir=$ED \
@@ -56,6 +62,7 @@ python examples/entity_disambiguation/train.py \
   --titles-file=data/entity_disambiguation/enwiki_20181220_titles.txt \
   --redirects-file=data/entity_disambiguation/enwiki_20181220_redirects.tsv \
   --output-dir=$ED  \
+  --device="cuda:3" \
   --use-tluke
 
 
@@ -66,4 +73,5 @@ python examples/entity_disambiguation/evaluate.py \
   --redirects-file=data/entity_disambiguation/enwiki_20181220_redirects.tsv \
   --inference-mode=local \
   --document-split-mode=simple \
+  --device="cuda:3" \
   --use-tluke

@@ -132,14 +132,10 @@ class EntityVocab:
         return len(self.inv_vocab)
 
     def __contains__(self, item: str):
-        obj = self.contains(item, language=None)
-        return obj
+        return self.contains(item)
 
     def __getitem__(self, key: str):
-        obj = self.get_id(key, language=None)
-        if obj is None:
-            obj = self.get_id(key, language="en")
-        return obj
+        return self.get_id(key)
 
     def __iter__(self):
         return iter(self.vocab)
@@ -153,10 +149,12 @@ class EntityVocab:
         return is_in
 
     def get_id(self, title: str, language: str = None, default: int = None) -> int:
-        try:
+        if Entity(title, language) in self.vocab:
             return self.vocab[Entity(title, language)]
-        except KeyError:
-            return default
+        else:
+            if Entity(title, "en") in self.vocab:
+                return self.vocab[Entity(title, "en")]
+        return default
 
     def get_title_by_id(self, id_: int, language: str = None) -> str:
         for entity in self.inv_vocab[id_]:

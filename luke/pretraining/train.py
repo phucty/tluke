@@ -18,8 +18,7 @@ from luke.model import LukeConfig
 from luke.model_table import LukeTableConfig
 from luke.pretraining.batch_generator import LukePretrainingBatchGenerator
 from luke.pretraining.dataset import WikipediaPretrainingDataset
-from luke.pretraining.model import (LukePretrainingModel,
-                                    LukeTablePretrainingModel)
+from luke.pretraining.model import LukePretrainingModel, LukeTablePretrainingModel
 from luke.utils.entity_vocab import EntityVocab
 from luke.utils.model_utils import ENTITY_VOCAB_FILE
 from torch.utils.tensorboard import SummaryWriter

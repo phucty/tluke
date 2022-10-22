@@ -8,8 +8,7 @@ import click
 import torch
 from examples.entity_disambiguation.dataloader import create_dataloader
 from examples.entity_disambiguation.dataset import load_dataset
-from examples.entity_disambiguation.model import (LukeForEntityDisambiguation,
-                                                  TLukeForEntityDisambiguation)
+from examples.entity_disambiguation.model import LukeForEntityDisambiguation, TLukeForEntityDisambiguation
 from luke.model_table import LukeTableConfig
 from luke.utils.entity_vocab import MASK_TOKEN, EntityVocab
 from numpy import False_

@@ -1,6 +1,6 @@
 {
   "train_batch_size": 2048,
-  "train_micro_batch_size_per_gpu": 4,
+  "train_micro_batch_size_per_gpu": 8,
   "optimizer": {
     "type": "AdamW",
     "params": {
