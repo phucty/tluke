@@ -6,6 +6,7 @@ import math
 import os
 import time
 from argparse import Namespace
+from collections import OrderedDict
 from enum import Flag
 from typing import List, Tuple, Union
 
@@ -60,8 +61,21 @@ def load_checkpoint(
         model_weights = torch.load(os.path.join(path, checkpoint_id), map_location="cpu")
         if "module" in model_weights:
             model_weights = model_weights["module"]
+
+        new_model_weights = OrderedDict()
+        for key, value in model_weights.items():
+            if key.startswith("entity_predictions"):
+                new_model_weights[f"module.{key}"] = value
+            else:
+                if key.startswith("luke."):
+                    key = key.replace("luke.", "")
+                elif key.startswith("tluke."):
+                    key = key.replace("tluke.", "")
+                new_model_weights[f"module.{key}"] = value
+
         if entity_vocab:
             orig_entity_vocab = EntityVocab(os.path.join(path, "entity_vocab.jsonl"))
+
             if "luke.entity_embeddings.entity_embeddings.weight" in model_weights:
                 orig_entity_emb = model_weights["luke.entity_embeddings.entity_embeddings.weight"]
             else:
@@ -75,14 +89,14 @@ def load_checkpoint(
                         orig_index = orig_entity_vocab[entity.title]
                         entity_emb[index] = orig_entity_emb[orig_index]
                         entity_bias[index] = orig_entity_bias[orig_index]
-                model_weights["entity_embeddings.entity_embeddings.weight"] = entity_emb
-                model_weights["entity_embeddings.mask_embedding"] = entity_emb[1].view(1, -1)
-                model_weights["entity_predictions.decoder.weight"] = entity_emb
-                model_weights["entity_predictions.bias"] = entity_bias
+                new_model_weights["module.entity_embeddings.entity_embeddings.weight"] = entity_emb
+                new_model_weights["module.entity_embeddings.mask_embedding"] = entity_emb[1].view(1, -1)
+                new_model_weights["module.entity_predictions.decoder.weight"] = entity_emb
+                new_model_weights["module.entity_predictions.bias"] = entity_bias
                 del orig_entity_bias, entity_emb, entity_bias
             del orig_entity_emb
 
-        model.load_state_dict(model_weights, strict=False)
+        miss_layers, new_layers = model.load_state_dict(new_model_weights, strict=False)
         epoch, global_step = 0, 0
     else:
         _, checkpoint_state_dict = model.load_checkpoint(path, checkpoint_id, **kwargs)
@@ -137,10 +151,13 @@ def create_table_model_and_config(
     if args.fix_bert_weights:
         for param in model.parameters():
             param.requires_grad = False
-        for param in model.entity_embeddings.parameters():
-            param.requires_grad = True
-        for param in model.entity_predictions.parameters():
-            param.requires_grad = True
+
+        if not args.fix_entity_weights:
+            for param in model.entity_embeddings.parameters():
+                param.requires_grad = True
+
+            for param in model.entity_predictions.parameters():
+                param.requires_grad = True
 
         # Add relationship prediction parameters
         for param in model.entity_hor_rel_predictions.parameters():
@@ -157,6 +174,10 @@ def create_table_model_and_config(
             param.requires_grad = True
         for param in model.embeddings.position_col_embeddings.parameters():
             param.requires_grad = True
+        for param in model.entity_embeddings.position_row_embeddings.parameters():
+            param.requires_grad = True
+        for param in model.entity_embeddings.position_col_embeddings.parameters():
+            param.requires_grad = True
 
     if args.word_only_training:
         model.entity_embeddings = None
@@ -167,7 +188,10 @@ def create_table_model_and_config(
 
     if args.freeze_entity_emb:
         model.entity_embeddings.entity_embeddings.weight.requires_grad = False
-
+    print("Train layers:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name)
     return model, config
 
 
@@ -277,6 +301,7 @@ def compute_total_training_steps(dataset_dir, train_batch_size, num_epochs):
 @click.option("--disable-entity-prediction-bias", is_flag=True)
 @click.option("--entity-emb-size", default=256, type=int)
 @click.option("--fix-bert-weights", is_flag=True)
+@click.option("--fix-entity-weights", is_flag=True)
 @click.option("--local_rank", type=int)  # specified by the deepspeed launcher
 @click.option("--mask-words-in-entity-span", is_flag=True)
 @click.option("--masked-lm-prob", default=0.15)

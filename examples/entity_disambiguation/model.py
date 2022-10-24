@@ -3,18 +3,18 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from luke.model_table import BertTableEmbeddings, LukeTableConfig, LukeTableModel, TableEntityEmbeddings
-from luke.pretraining.model import LukeTablePretrainingModel, TLukePreTrainedModel
+from luke.model_table import (BertTableEmbeddings, LukeTableConfig,
+                              LukeTableModel, TableEntityEmbeddings)
+from luke.pretraining.model import (LukeTablePretrainingModel,
+                                    TLukePreTrainedModel)
 from torch import nn
 from transformers import LukeConfig
 from transformers.file_utils import ModelOutput
 from transformers.models.bert.modeling_bert import BertEmbeddings
-from transformers.models.luke.modeling_luke import (
-    EntityPredictionHead,
-    LukeEntityEmbeddings,
-    LukeModel,
-    LukePreTrainedModel,
-)
+from transformers.models.luke.modeling_luke import (EntityPredictionHead,
+                                                    LukeEntityEmbeddings,
+                                                    LukeModel,
+                                                    LukePreTrainedModel)
 
 
 @dataclasses.dataclass
@@ -178,7 +178,7 @@ class TLukeEntityEmbeddingsForEntityDisambiguation(TableEntityEmbeddings):
         position_embeddings = position_embeddings / position_embedding_mask.sum(dim=-2).clamp(min=1e-7)
 
         position_row_embeddings = self.position_row_embeddings(position_row_ids)
-        position_col_embeddings = self.position_row_embeddings(position_col_ids)
+        position_col_embeddings = self.position_col_embeddings(position_col_ids)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 

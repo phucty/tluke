@@ -8,7 +8,7 @@ from torch import nn
 from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.models.bert.modeling_bert import BertPreTrainingHeads
-from transformers.models.luke.modeling_luke import EntityPredictionHead
+from transformers.models.luke.modeling_luke import EntityPredictionHead, EntityPredictionHeadTransform
 from transformers.models.roberta.modeling_roberta import RobertaLMHead
 
 
@@ -142,28 +142,28 @@ class LukePretrainingModel(LukeModel):
         return {k: m.get_metric(reset=reset) for k, m in self.metrics.items()}
 
 
-class CellEmbeddingHeadTransform(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.entity_emb_size)
-        if isinstance(config.hidden_act, str):
-            self.transform_act_fn = ACT2FN[config.hidden_act]
-        else:
-            self.transform_act_fn = config.hidden_act
-        self.LayerNorm = nn.LayerNorm(config.entity_emb_size, eps=config.layer_norm_eps)
+# class CellEmbeddingHeadTransform(nn.Module):
+#     def __init__(self, config):
+#         super().__init__()
+#         self.dense = nn.Linear(config.hidden_size, config.entity_emb_size)
+#         if isinstance(config.hidden_act, str):
+#             self.transform_act_fn = ACT2FN[config.hidden_act]
+#         else:
+#             self.transform_act_fn = config.hidden_act
+#         self.LayerNorm = nn.LayerNorm(config.entity_emb_size, eps=config.layer_norm_eps)
 
-    def forward(self, hidden_states):
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.transform_act_fn(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states)
-        return hidden_states
+#     def forward(self, hidden_states):
+#         hidden_states = self.dense(hidden_states)
+#         hidden_states = self.transform_act_fn(hidden_states)
+#         hidden_states = self.LayerNorm(hidden_states)
+#         return hidden_states
 
 
 class EntityHorRelPredictionHead(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.transform = CellEmbeddingHeadTransform(config)
+        self.transform = EntityPredictionHeadTransform(config)
         # 4 cells, --> 2: Is same relationship or not
         self.decoder = nn.Linear(config.entity_emb_size * 4, 2, bias=False)
         self.bias = nn.Parameter(torch.zeros(2))
@@ -179,7 +179,7 @@ class EntityVerRelPredictionHead(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.transform = CellEmbeddingHeadTransform(config)
+        self.transform = EntityPredictionHeadTransform(config)
         # 4 cells, --> 2: Is same relationship or not
         self.decoder = nn.Linear(config.entity_emb_size * 4, 2, bias=False)
         self.bias = nn.Parameter(torch.zeros(2))
@@ -195,7 +195,7 @@ class WordHorRelPredictionHead(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.transform = CellEmbeddingHeadTransform(config)
+        self.transform = EntityPredictionHeadTransform(config)
         # 4 cells, --> 2: Is same relationship or not
         self.decoder = nn.Linear(config.entity_emb_size * 4, 2, bias=False)
         self.bias = nn.Parameter(torch.zeros(2))
@@ -211,7 +211,7 @@ class WordVerRelPredictionHead(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.transform = CellEmbeddingHeadTransform(config)
+        self.transform = EntityPredictionHeadTransform(config)
         # 4 cells, --> 2: Is same relationship or not
         self.decoder = nn.Linear(config.entity_emb_size * 4, 2, bias=False)
         self.bias = nn.Parameter(torch.zeros(2))
@@ -238,10 +238,14 @@ class LukeTablePretrainingModel(LukeTableModel):
         self.entity_predictions.decoder.weight = self.entity_embeddings.entity_embeddings.weight
 
         self.entity_hor_rel_predictions = EntityHorRelPredictionHead(config)
+        # self.entity_hor_rel_predictions.transform.weight = self.entity_predictions.transform.weight
         self.entity_ver_rel_predictions = EntityVerRelPredictionHead(config)
+        # self.entity_ver_rel_predictions.transform.weight = self.entity_predictions.transform.weight
 
         self.word_hor_rel_predictions = WordHorRelPredictionHead(config)
+        # self.word_hor_rel_predictions.transform.weight = self.entity_predictions.transform.weight
         self.word_ver_rel_predictions = WordVerRelPredictionHead(config)
+        # self.word_ver_rel_predictions.transform.weight = self.entity_predictions.transform.weight
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-1)
 

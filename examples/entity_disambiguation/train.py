@@ -70,28 +70,7 @@ def train(
     entity_vocab = EntityVocab(os.path.join(model_dir, "entity_vocab.jsonl"))
     mask_entity_id = entity_vocab[MASK_TOKEN]
     if use_tluke:
-        metadata = json.load(open(os.path.join(model_dir, "metadata.json")))
-        config = LukeTableConfig(**metadata["model_config"])
-        state_dict = torch.load(os.path.join(model_dir, "pytorch_model.bin"), map_location="cpu")
-        if "module" in state_dict:
-            state_dict = state_dict["module"]
-
-        new_state_dict = OrderedDict()
-        for key, value in state_dict.items():
-            if key.startswith("lm_head") or key.startswith("cls"):
-                continue
-            if key.startswith("entity_predictions"):
-                new_state_dict[key] = value
-            else:
-                new_state_dict[f"tluke.{key}"] = value
-        entity_embeddings = state_dict["entity_embeddings.entity_embeddings.weight"]
-
-        new_state_dict["tluke.entity_embeddings.mask_embedding"] = entity_embeddings[mask_entity_id]
-        del state_dict
-        model = TLukeForEntityDisambiguation(config=config)
-        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
-        del new_state_dict
-        assert not missing_keys or missing_keys == ["tluke.embeddings.position_ids"]
+        model = TLukeForEntityDisambiguation.from_pretrained(model_dir).train()
         model.to(device)
         model.tluke.entity_embeddings.entity_embeddings.weight.requires_grad = False
     else:

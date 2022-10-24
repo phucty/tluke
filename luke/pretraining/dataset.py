@@ -55,6 +55,7 @@ _abstract_only = _language = None
 @click.option("--predefined-entities-only", is_flag=True)
 @click.option("--from-tables", is_flag=True)
 @click.option("--get-metadata", is_flag=True)
+@click.option("--get-headers", is_flag=True)
 @click.option("--max-num-rows", default=30)
 @click.option("--max-num-cols", default=20)
 @click.option("--max-cell-tokens", default=30)
@@ -264,6 +265,7 @@ class WikipediaPretrainingDataset:
         predefined_entities_only: bool,
         from_tables: bool,
         get_metadata: bool,
+        get_headers: bool,
         max_num_rows: int,
         max_num_cols: int,
         max_cell_tokens: int,
@@ -323,6 +325,7 @@ class WikipediaPretrainingDataset:
                 include_sentences_without_entities,
                 include_unk_entities,
                 get_metadata,
+                get_headers,
                 max_num_rows,
                 max_num_cols,
                 max_cell_tokens,
@@ -382,6 +385,7 @@ class WikipediaPretrainingDataset:
         include_sentences_without_entities: bool,
         include_unk_entities: bool,
         get_metadata: bool,
+        get_headers: bool,
         max_num_rows: int,
         max_num_cols: int,
         max_cell_tokens: int,
@@ -394,7 +398,7 @@ class WikipediaPretrainingDataset:
         global _abstract_only
         global _language
 
-        global _max_num_rows, _max_num_cols, _max_cell_value_length, _max_cell_tokens, _max_length_caption, _max_header_tokens, _get_metadata, _reset_position_index_per_cell
+        global _max_num_rows, _max_num_cols, _max_cell_value_length, _max_cell_tokens, _max_length_caption, _max_header_tokens, _get_metadata, _reset_position_index_per_cell, _get_headers
 
         _dump_db = dump_db
         _tokenizer = tokenizer
@@ -415,6 +419,7 @@ class WikipediaPretrainingDataset:
         _max_length_caption = max_length_caption
         _max_header_tokens = max_header_tokens
         _get_metadata = get_metadata
+        _get_headers = get_headers
         _reset_position_index_per_cell = reset_position_index_per_cell
 
     @staticmethod
@@ -704,39 +709,6 @@ class WikipediaPretrainingDataset:
                     sentences_row.append(sentences_cell)
                 sentences_data.append(sentences_row)
 
-            prefix_words = []
-            prefix_links = []
-            if _get_metadata:
-                # Add metadata
-                for sent_words, sent_links in sentences_metadata:
-                    prefix_links += [
-                        (id_, row, col, start + len(prefix_words), end + len(prefix_words))
-                        for id_, row, col, start, end in sent_links
-                    ]
-                    prefix_words += sent_words
-
-            # Add table headers
-            for header_cell in sentences_headers:
-                header_cell_text = []
-                header_cell_links = []
-                for sent_words, sent_links in header_cell:
-                    if len(header_cell_text) + len(sent_words) > _max_header_tokens:
-                        break
-                    header_cell_text += sent_words
-                    for id_, row, col, start, end in sent_links:
-                        if end > len(header_cell_text):
-                            header_cell_text = header_cell_text[:start]
-                            break
-                        header_cell_links.append(
-                            (id_, row, col, start + len(header_cell_text), end + len(header_cell_text))
-                        )
-
-                prefix_links += [
-                    (id_, row, col, start + len(prefix_words), end + len(prefix_words))
-                    for id_, row, col, start, end in header_cell_links
-                ]
-                prefix_words += header_cell_text
-
             def gen_examples(words, links):
                 links = links[:_max_entity_length]
                 word_ids = _tokenizer.convert_tokens_to_ids([token for token, _, _ in words])
@@ -779,55 +751,101 @@ class WikipediaPretrainingDataset:
                 )
                 return example
 
-            if len(prefix_words) > _max_num_tokens:
-                logger.warn("Number tokens in table caption, and headers are larger than max_tokens")
-                continue
+            def gen_example_with_setting(get_metadata: bool, get_headers: bool):
+                prefix_words = []
+                prefix_links = []
+                if get_metadata:
+                    # Add metadata
+                    for sent_words, sent_links in sentences_metadata:
+                        prefix_links += [
+                            (id_, row, col, start + len(prefix_words), end + len(prefix_words))
+                            for id_, row, col, start, end in sent_links
+                        ]
+                        prefix_words += sent_words
 
-            words = prefix_words.copy()
-            links = prefix_links.copy()
-            row_i = 1
-            for sentence_i, sentences_row in enumerate(sentences_data):
-                row_links = []
-                row_words = []
-                for sentences_cell in sentences_row:
-                    for sent_words, sent_links in sentences_cell:
-                        cell_text = sent_words[:_max_cell_tokens]
-                        cell_links = []
-                        for id_, row_i_tmp, col_i_tmp, start, end in sent_links:
-                            if end > len(cell_text):
-                                cell_text = cell_text[:start]
+                # Add table headers
+                if get_headers:
+                    for header_cell in sentences_headers:
+                        header_cell_text = []
+                        header_cell_links = []
+                        for sent_words, sent_links in header_cell:
+                            if len(header_cell_text) + len(sent_words) > _max_header_tokens:
                                 break
-                            cell_links.append((id_, row_i_tmp, col_i_tmp, start + len(row_words), end + len(row_words)))
+                            header_cell_text += sent_words
+                            for id_, row, col, start, end in sent_links:
+                                if end > len(header_cell_text):
+                                    header_cell_text = header_cell_text[:start]
+                                    break
+                                header_cell_links.append(
+                                    (id_, row, col, start + len(header_cell_text), end + len(header_cell_text))
+                                )
 
-                        row_links += cell_links
-                        row_words += cell_text
+                        prefix_links += [
+                            (id_, row, col, start + len(prefix_words), end + len(prefix_words))
+                            for id_, row, col, start, end in header_cell_links
+                        ]
+                        prefix_words += header_cell_text
 
-                if (
-                    len(words) + len(row_words) > _max_num_tokens
-                    or (sentence_i + 1 % _max_num_rows) == 0
-                    or row_i > _max_num_rows
-                ):
-                    if not links and not _include_sentences_without_entities:
-                        continue
+                if len(prefix_words) > _max_num_tokens:
+                    logger.warn("Number tokens in table caption, and headers are larger than max_tokens")
+                    return
+
+                words = prefix_words.copy()
+                links = prefix_links.copy()
+                row_i = 1
+                for sentence_i, sentences_row in enumerate(sentences_data):
+                    row_links = []
+                    row_words = []
+                    for sentences_cell in sentences_row:
+                        for sent_words, sent_links in sentences_cell:
+                            cell_text = sent_words[:_max_cell_tokens]
+                            cell_links = []
+                            for id_, row_i_tmp, col_i_tmp, start, end in sent_links:
+                                if end > len(cell_text):
+                                    cell_text = cell_text[:start]
+                                    break
+                                cell_links.append(
+                                    (id_, row_i_tmp, col_i_tmp, start + len(row_words), end + len(row_words))
+                                )
+
+                            row_links += cell_links
+                            row_words += cell_text
+
+                    if (
+                        len(words) + len(row_words) > _max_num_tokens
+                        or (sentence_i + 1 % _max_num_rows) == 0
+                        or row_i > _max_num_rows
+                    ):
+                        if not links and not _include_sentences_without_entities:
+                            continue
+                        example = gen_examples(words, links)
+                        if example:
+                            ret.append((example.SerializeToString()))
+                        words = prefix_words.copy()
+                        links = prefix_links.copy()
+                        # if _reset_position_index_per_cell:
+                        row_i = 1
+
+                    links += [
+                        (token_id, row_i, c_i, start + len(words), end + len(words))
+                        for token_id, r_i, c_i, start, end in row_links
+                    ]
+                    words += [(token_id, row_i, c_i) for token_id, r_i, c_i in row_words]
+                    row_i += 1
+
+                if len(prefix_words) < len(words) <= _max_num_tokens and (links or _include_sentences_without_entities):
                     example = gen_examples(words, links)
                     if example:
                         ret.append((example.SerializeToString()))
-                    words = prefix_words.copy()
-                    links = prefix_links.copy()
-                    # if _reset_position_index_per_cell:
-                    row_i = 1
 
-                links += [
-                    (token_id, row_i, c_i, start + len(words), end + len(words))
-                    for token_id, r_i, c_i, start, end in row_links
-                ]
-                words += [(token_id, row_i, c_i) for token_id, r_i, c_i in row_words]
-                row_i += 1
+            # Setting:
+            # Just data
+            gen_example_with_setting(get_metadata=False, get_headers=False)
+            # with headers
+            gen_example_with_setting(get_metadata=False, get_headers=True)
+            # with headers and metadata
+            gen_example_with_setting(get_metadata=True, get_headers=True)
 
-            if len(prefix_words) < len(words) <= _max_num_tokens and (links or _include_sentences_without_entities):
-                example = gen_examples(words, links)
-                if example:
-                    ret.append((example.SerializeToString()))
         return ret
 
     @staticmethod

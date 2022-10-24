@@ -14,10 +14,6 @@ PRETRAIN_METADATA="${PRETRAIN}/metadata.json"
 PRETRAIN_VOCAB="${PRETRAIN}/entity_vocab.jsonl"
 
 ED=models/tluke_ed_large/
-ED_MODEL="${ED}pytorch_model.bin"
-ED_METADATA="${ED}metadata.json"
-ED_VOCAB="${ED}/entity_vocab.jsonl"
-
 
 deepspeed \
     --num_gpus=$GPUS \
@@ -27,6 +23,7 @@ deepspeed \
     --dataset-dir=$DATA \
     --bert-model-name=$BERT \
     --num-epochs=$EPOCH1 \
+    --entity-emb-size=1024 \
     --masked-lm-prob=0.0 \
     --masked-entity-prob=0.3 \
     --fix-bert-weights \
@@ -35,26 +32,27 @@ deepspeed \
     --resume-checkpoint-id=$PRETRAIN_INIT
 
 
-deepspeed \
-    --num_gpus=$GPUS \
-    luke/pretraining/train.py \
-    --output-dir=$PRETRAIN \
-    --deepspeed-config-file=$STAGE2 \
-    --dataset-dir=$DATA \
-    --bert-model-name=$BERT \
-    --num-epochs=$EPOCH2 \
-    --masked-lm-prob=0.0 \
-    --masked-entity-prob=0.3 \
-    --reset-optimization-states \
-    --from-tables \
-    --resume-checkpoint-id=$PRETRAIN_STAGE1
+# deepspeed \
+#     --num_gpus=$GPUS \
+#     luke/pretraining/train.py \
+#     --output-dir=$PRETRAIN \
+#     --deepspeed-config-file=$STAGE2 \
+#     --dataset-dir=$DATA \
+#     --bert-model-name=$BERT \
+#     --num-epochs=$EPOCH2 \
+#     --entity-emb-size=1024 \
+#     --masked-lm-prob=0.0 \
+#     --masked-entity-prob=0.3 \
+#     --reset-optimization-states \
+#     --from-tables \
+#     --resume-checkpoint-id=$PRETRAIN_STAGE1
 
-echo $PRETRAIN_STAGE2 $ED_MODEL
-echo $PRETRAIN_METADATA $ED_METADATA
-echo $PRETRAIN_VOCAB $ED_VOCAB
-cp $PRETRAIN_STAGE2 $ED_MODEL
-cp $PRETRAIN_METADATA $ED_METADATA
-cp $PRETRAIN_VOCAB $ED_VOCAB
+python examples/entity_disambiguation/scripts/convert_checkpoint.py \
+    --checkpoint-file=$PRETRAIN_STAGE2 \
+    --metadata-file=$PRETRAIN_METADATA \
+    --entity-vocab-file=$PRETRAIN_VOCAB \
+    --output-dir=$ED \
+    --use-tluke
 
 python examples/entity_disambiguation/train.py \
   --model-dir=$ED \

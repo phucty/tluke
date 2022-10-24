@@ -158,6 +158,9 @@ class EntityVocab:
 
     def get_title_by_id(self, id_: int, language: str = None) -> str:
         for entity in self.inv_vocab[id_]:
+            if language is None and entity.language == "en":
+                return entity.title
+
             if entity.language == language:
                 return entity.title
 

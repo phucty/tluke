@@ -86,7 +86,7 @@ class TableEntityEmbeddings(nn.Module):
         position_embeddings = position_embeddings / position_embedding_mask.sum(dim=-2).clamp(min=1e-7)
 
         position_row_embeddings = self.position_row_embeddings(position_row_ids)
-        position_col_embeddings = self.position_row_embeddings(position_col_ids)
+        position_col_embeddings = self.position_col_embeddings(position_col_ids)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
@@ -205,7 +205,7 @@ class RobertaTableEmbeddings(RobertaEmbeddings):
             inputs_embeds = self.word_embeddings(input_ids)
 
         position_row_embeddings = self.position_row_embeddings(input_row_ids)
-        position_col_embeddings = self.position_row_embeddings(input_col_ids)
+        position_col_embeddings = self.position_col_embeddings(input_col_ids)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
@@ -265,7 +265,7 @@ class BertTableEmbeddings(BertEmbeddings):
             inputs_embeds = self.word_embeddings(input_ids)
 
         position_row_embeddings = self.position_row_embeddings(input_row_ids)
-        position_col_embeddings = self.position_row_embeddings(input_col_ids)
+        position_col_embeddings = self.position_col_embeddings(input_col_ids)
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings + position_row_embeddings + position_col_embeddings

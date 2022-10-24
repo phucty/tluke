@@ -20,7 +20,7 @@
       "warmup_min_lr": 0,
       "warmup_max_lr": 5e-4,
       "warmup_num_steps": 0,
-      "total_num_steps": 29,
+      "total_num_steps": 410,
       "warmup_type": "linear"
     }
   },
