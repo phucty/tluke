@@ -1,12 +1,14 @@
 import logging
 import os
+from time import time
 from typing import List, Optional
 
 import click
 import torch
 from examples.entity_disambiguation.dataloader import create_dataloader
 from examples.entity_disambiguation.dataset import load_dataset
-from examples.entity_disambiguation.model import LukeForEntityDisambiguation, TLukeForEntityDisambiguation
+from examples.entity_disambiguation.model import (LukeForEntityDisambiguation,
+                                                  TLukeForEntityDisambiguation)
 from luke.utils.entity_vocab import MASK_TOKEN, PAD_TOKEN, EntityVocab
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -65,6 +67,7 @@ def evaluate(
     document_split_mode: str,
     use_tluke: bool,
 ):
+    start_t = time()
     if use_tluke:
         model = TLukeForEntityDisambiguation.from_pretrained(model_dir).eval()
     else:
@@ -165,6 +168,7 @@ def evaluate(
         stats.append([dataset_name, f1])
     print("\t".join([dataset_name for dataset_name, _ in stats]))
     print("\t".join([f"{f1:.3f}" for _, f1 in stats]))
+    print(f"Run time: {time() - start_t}")
 
 
 if __name__ == "__main__":

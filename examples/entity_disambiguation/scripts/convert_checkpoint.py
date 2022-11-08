@@ -5,9 +5,9 @@ from collections import OrderedDict
 import click
 import debugpy
 import torch
+from examples.entity_disambiguation.model import LukeForEntityDisambiguation, TLukeForEntityDisambiguation
 from luke.model_table import LukeTableConfig
 from luke.utils.entity_vocab import EntityVocab
-from model import LukeForEntityDisambiguation, TLukeForEntityDisambiguation
 from transformers import AutoTokenizer, LukeConfig
 
 # debugpy.listen(5678)

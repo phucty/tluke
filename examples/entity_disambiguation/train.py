@@ -6,15 +6,17 @@ from email.policy import default
 
 import click
 import torch
-from examples.entity_disambiguation.dataloader import create_dataloader
-from examples.entity_disambiguation.dataset import load_dataset
-from examples.entity_disambiguation.model import LukeForEntityDisambiguation, TLukeForEntityDisambiguation
-from luke.model_table import LukeTableConfig
-from luke.utils.entity_vocab import MASK_TOKEN, EntityVocab
 from numpy import False_
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.optimization import AdamW, get_linear_schedule_with_warmup
+
+from examples.entity_disambiguation.dataloader import create_dataloader
+from examples.entity_disambiguation.dataset import load_dataset
+from examples.entity_disambiguation.model import (LukeForEntityDisambiguation,
+                                                  TLukeForEntityDisambiguation)
+from luke.model_table import LukeTableConfig
+from luke.utils.entity_vocab import MASK_TOKEN, EntityVocab
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 @click.option("--output-dir", type=click.Path(), required=True)
 @click.option("--titles-file", type=click.Path(exists=True), required=True)
 @click.option("--redirects-file", type=click.Path(exists=True), required=True)
-@click.option("--batch-size", type=int, default=8)
+@click.option("--batch-size", type=int, default=16)
 @click.option("--gradient-accumulation-steps", type=int, default=1)
 @click.option("--learning-rate", type=float, default=2e-5)
 @click.option("--num-epochs", type=int, default=2)
