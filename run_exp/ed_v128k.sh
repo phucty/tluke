@@ -15,21 +15,21 @@ PRETRAIN_VOCAB="${PRETRAIN}/entity_vocab.jsonl"
 
 ED=models/tluke_ed_large/
 
-deepspeed \
-    --num_gpus=$GPUS \
-    luke/pretraining/train.py \
-    --output-dir=$PRETRAIN \
-    --deepspeed-config-file=$STAGE1 \
-    --dataset-dir=$DATA \
-    --bert-model-name=$BERT \
-    --num-epochs=$EPOCH1 \
-    --entity-emb-size=1024 \
-    --masked-lm-prob=0.0 \
-    --masked-entity-prob=0.3 \
-    --fix-bert-weights \
-    --from-tables \
-    --reset-optimization-states \
-    --resume-checkpoint-id=$PRETRAIN_INIT
+# deepspeed \
+#     --num_gpus=$GPUS \
+#     luke/pretraining/train.py \
+#     --output-dir=$PRETRAIN \
+#     --deepspeed-config-file=$STAGE1 \
+#     --dataset-dir=$DATA \
+#     --bert-model-name=$BERT \
+#     --num-epochs=$EPOCH1 \
+#     --entity-emb-size=1024 \
+#     --masked-lm-prob=0.0 \
+#     --masked-entity-prob=0.3 \
+#     --fix-bert-weights \
+#     --from-tables \
+#     --reset-optimization-states \
+#     --resume-checkpoint-id=$PRETRAIN_INIT
 
 
 # deepspeed \
@@ -54,14 +54,14 @@ python examples/entity_disambiguation/scripts/convert_checkpoint.py \
     --output-dir=$ED \
     --use-tluke
 
-python examples/entity_disambiguation/train.py \
-  --model-dir=$ED \
-  --dataset-dir=data/entity_disambiguation/ \
-  --titles-file=data/entity_disambiguation/enwiki_20181220_titles.txt \
-  --redirects-file=data/entity_disambiguation/enwiki_20181220_redirects.tsv \
-  --output-dir=$ED  \
-  --device="cuda:3" \
-  --use-tluke
+# python examples/entity_disambiguation/train.py \
+#   --model-dir=$ED \
+#   --dataset-dir=data/entity_disambiguation/ \
+#   --titles-file=data/entity_disambiguation/enwiki_20181220_titles.txt \
+#   --redirects-file=data/entity_disambiguation/enwiki_20181220_redirects.tsv \
+#   --output-dir=$ED  \
+#   --device="cuda:3" \
+#   --use-tluke
 
 
 python examples/entity_disambiguation/evaluate.py \

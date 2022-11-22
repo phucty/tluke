@@ -31,7 +31,7 @@ METADATA_FILE = "metadata.json"
 
 logger = None
 
-# import debugpy
+import debugpy
 
 # debugpy.listen(5678)
 # print("Wait for client")
@@ -82,7 +82,7 @@ def load_checkpoint(
             else:
                 orig_entity_emb = model_weights["entity_embeddings.entity_embeddings.weight"]
             if orig_entity_emb.size(0) != len(entity_vocab):  # detect whether the model is fine-tuned
-                entity_emb = orig_entity_emb.new_zeros((entity_vocab.size, config.hidden_size))
+                entity_emb = orig_entity_emb.new_zeros((entity_vocab.size, config.entity_emb_size))
                 orig_entity_bias = model_weights["entity_predictions.bias"]
                 entity_bias = orig_entity_bias.new_zeros(entity_vocab.size)
                 for entity, index in entity_vocab.vocab.items():
@@ -94,6 +94,56 @@ def load_checkpoint(
                 new_model_weights["module.entity_embeddings.mask_embedding"] = entity_emb[1].view(1, -1)
                 new_model_weights["module.entity_predictions.decoder.weight"] = entity_emb
                 new_model_weights["module.entity_predictions.bias"] = entity_bias
+
+                # module.embeddings.word_embeddings
+                # module.embeddings.position_embeddings
+                # module.entity_embeddings.position_embeddings
+                # module.lm_head.bias
+                if (
+                    model.module.embeddings.word_embeddings.num_embeddings
+                    != new_model_weights["module.embeddings.word_embeddings.weight"].shape[0]
+                ):
+                    new_model_weights["module.embeddings.word_embeddings.weight"] = new_model_weights[
+                        "module.embeddings.word_embeddings.weight"
+                    ][: model.module.embeddings.word_embeddings.num_embeddings, :]
+
+                if model.module.lm_head.bias.shape[0] != new_model_weights["module.lm_head.bias"].shape[0]:
+                    new_model_weights["module.lm_head.bias"] = new_model_weights["module.lm_head.bias"][
+                        : model.module.lm_head.bias.shape[0]
+                    ]
+
+                if (
+                    model.module.entity_embeddings.position_embeddings.num_embeddings
+                    != new_model_weights["module.entity_embeddings.position_embeddings.weight"].shape[0]
+                ):
+                    org_possition_embeddings = new_model_weights["module.entity_embeddings.position_embeddings.weight"]
+                    org_possition_embeddings_size = org_possition_embeddings.shape[0]
+                    possition_embeddings_size = model.module.entity_embeddings.position_embeddings.num_embeddings
+                    possition_embeddings_hiden = model.module.entity_embeddings.position_embeddings.embedding_dim
+                    possition_embeddings = org_possition_embeddings.new_zeros(
+                        (possition_embeddings_size, possition_embeddings_hiden)
+                    )
+                    possition_embeddings[:org_possition_embeddings_size, :] = new_model_weights[
+                        "module.entity_embeddings.position_embeddings.weight"
+                    ]
+                    new_model_weights["module.entity_embeddings.position_embeddings.weight"] = possition_embeddings
+
+                if (
+                    model.module.embeddings.position_embeddings.num_embeddings
+                    != new_model_weights["module.embeddings.position_embeddings.weight"].shape[0]
+                ):
+                    org_possition_embeddings = new_model_weights["module.embeddings.position_embeddings.weight"]
+                    org_possition_embeddings_size = org_possition_embeddings.shape[0]
+                    possition_embeddings_size = model.module.embeddings.position_embeddings.num_embeddings
+                    possition_embeddings_hiden = model.module.embeddings.position_embeddings.embedding_dim
+                    possition_embeddings = org_possition_embeddings.new_zeros(
+                        (possition_embeddings_size, possition_embeddings_hiden)
+                    )
+                    possition_embeddings[:org_possition_embeddings_size, :] = new_model_weights[
+                        "module.embeddings.position_embeddings.weight"
+                    ]
+                    new_model_weights["module.embeddings.position_embeddings.weight"] = possition_embeddings
+
                 del orig_entity_bias, entity_emb, entity_bias
             del orig_entity_emb
 
@@ -126,7 +176,7 @@ def create_table_model_and_config(
     args: Namespace,
     entity_vocab_size: int,
     local_rank: int,
-    max_num_rows: int = 32,
+    max_num_rows: int = 30,
     max_num_cols: int = 20,
     max_cell_value_length: int = 128,
     max_cell_tokens: int = 30,
@@ -260,11 +310,12 @@ def load_state_dict(
             key = key[8:]
         elif key.startswith("bert."):
             key = key[5:]
+        elif key.startswith("longformer."):
+            key = key[11:]
         new_state_dict[key] = param
-
     state_dict = new_state_dict
 
-    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
     assert len(unexpected_keys) == 0
     logger.debug(f"missing keys: {str(missing_keys)}")
 

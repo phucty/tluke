@@ -24,6 +24,7 @@ import psutil
 import six
 import wikitextparser as wtp
 from lz4 import frame
+from matplotlib.pyplot import table
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ def remove_html_tags(raw_html):
     return cleantext
 
 
-@dataclass()
+@dataclass
 class WikiLink:
     title: str
     text: str
@@ -82,7 +83,7 @@ class WikiLink:
 class Paragraph:
     text: str
     wiki_links: List[WikiLink]
-    abstract: str
+    abstract: bool
 
     def __repr__(self):
         text = "<Paragraph %s>" % (self.text[:50] + "...")
@@ -97,23 +98,33 @@ class Paragraph:
 
 @dataclass
 class TableCell:
-    text: str
-    wiki_links: List[WikiLink]
+    # text: str
+    # wiki_links: List[WikiLink]
+    paragraphs: List[Paragraph]
     is_header: bool
 
     def __repr__(self):
-        if self.wiki_links:
-            text = f"{self.text} ({len(self.wiki_links)} links)"
-        else:
-            text = self.text
+        total_links = 0
+        text = ""
+        for paragraph in self.paragraphs:
+            total_links += len(paragraph.wiki_links)
+            if paragraph.text:
+                text += paragraph.text
+
+        if total_links:
+            text += f" ({total_links} links)"
 
         if six.PY2:
             return (text).encode("utf-8")
         else:
             return text
 
+    @property
+    def text(self):
+        return " ".join([paragraph.text for paragraph in self.paragraphs])
+
     def __reduce__(self):
-        return (self.__class__, (self.text, self.wiki_links, self.is_header))
+        return (self.__class__, (self.paragraphs, self.is_header))
 
 
 @dataclass
@@ -124,17 +135,22 @@ class WikiTable:
     cells: List[TableCell]
     headers_rows: List[int]
     headers_cells: List[Tuple[int, ...]]
-    caption: Paragraph
+    caption: List[Paragraph]
     n_row: int
     n_col: int
+    out_text: List[Paragraph]
+    # out_text_index: int
 
     def __repr__(self):
         text = [f"{self.title}.{self.table_index}"]
         if self.caption:
-            text.append(f"C:{self.caption.text}")
+            caption_text = " ".join([i.text for i in self.caption])
+            text.append(f"C:{caption_text}")
         if self.section:
             text.append("S:" + "/".join(self.section))
+
         text = " | ".join(text)[:50]
+
         if six.PY2:
             return (text).encode("utf-8")
         else:
@@ -153,6 +169,7 @@ class WikiTable:
                 self.caption,
                 self.n_row,
                 self.n_col,
+                self.out_text,
             ),
         )
 
@@ -161,6 +178,23 @@ class WikiTable:
         for rows in self.cells:
             table.append([col.text for col in rows])
         return pd.DataFrame(table)
+
+    def get_outside_text(self):
+        return self.out_text.text
+
+    def to_text(self):
+        table_text = ""
+        if self.caption:
+            caption_text = " ".join([i.text for i in self.caption])
+            table_text += f"\nCaption: {caption_text}\n"
+        table_text += self.to_pandas().to_string() + "\n"
+        if self.out_text:
+            out_text = " ".join([i.text for i in self.out_text])
+            table_text = out_text + "\n" + table_text
+
+        if self.section:
+            table_text = "\n".join(self.section) + table_text
+        return f"{self.title}\n{table_text}"
 
 
 @dataclass
@@ -424,7 +458,7 @@ class WikipediaDumpDB:
                     # if pool_size == 1:
 
                     # for title in tqdm(dump_reader, mininterval=5):
-                    # ret = _parse(title, preprocess_func)
+                    ret = _parse(title, preprocess_func)
                     if ret:
                         if ret[0] == "page":
                             buff_size += len(ret[1][0]) + len(ret[1][1]) + len(ret[1][2])
@@ -444,7 +478,8 @@ class WikipediaDumpDB:
                         write_db(table_db, table_buf)
                         table_buf = []
                         buff_size = 0
-
+                    # if buff_size > 1000000:
+                    # break
                     # if ret[1][0].decode("utf-8") == "1946 European Athletics Championships – Men's high jump":
                     #     break
                     # if len(page_buf) > 100000:
@@ -513,28 +548,91 @@ def _parse_tables(wikipedia_title, wiki_text: str):
 
     tables = []
     section_hierarchy = defaultdict(list)
+    section_text_wo_table = {}
+    # section_index_table = {}
     for section in parsed_page_obj.sections:
+        if not section.tables:
+            continue
+        # Remove other subsections text
+        # section
+        # | text     : keep
+        # | table    : remove
+        # | sub-section  : remove
+        section_text = wtp.parse(section.contents).plain_text(replace_wikilinks=False).strip()
+
+        # remove other sub-section
+        for subsection in section.sections:
+            if not subsection.contents or subsection.span == section.span:
+                continue
+            subsection_text = wtp.parse(subsection.contents).plain_text(replace_wikilinks=False).strip()
+            try:
+                subsection_start = section_text.index(subsection_text)
+                section_text = (
+                    section_text[0:subsection_start] + section_text[subsection_start + len(subsection_text) :]
+                ).strip()
+            except ValueError:
+                pass
+
         for table in section.tables:
             if section.title:
                 section_title = section.title.strip()
                 section_hierarchy[table.span].append(section_title)
 
+            # remove table text
+            table_text = wtp.parse(table.string).plain_text(replace_wikilinks=False).strip()
+            try:
+                table_start = section_text.index(table_text)
+                section_text = (section_text[0:table_start] + section_text[table_start + len(table_text) :]).strip()
+                # section_index_table[table.span] = table_start
+            except ValueError:
+                pass
+
+        if section_text:
+            # remove extra spaces, enter, tab
+            # section_text, section_links = _parse_text_with_wikilinks(section_text)
+
+            for table in section.tables:
+                section_paragraphs = _parse_wikitext_with_parser_from_hell(section_text)
+                section_paragraphs = [
+                    [args[0], [WikiLink(*i) for i in args[1]], args[2]] for args in section_paragraphs
+                ]
+                section_paragraphs = [Paragraph(*args) for args in section_paragraphs]
+                section_text_wo_table[table.span] = section_paragraphs
+                # section_text_wo_table[table.span] = Paragraph(
+                # text=section_text, wiki_links=section_links, abstract=False
+                # )
+
     for table_index, parsed_table in enumerate(parsed_page_obj.tables):
+        if parsed_table.tables:
+            continue
         try:
             table_section = section_hierarchy.get(parsed_table.span)
+
+            table_out_text = section_text_wo_table.get(parsed_table.span)
+            # table_index = section_index_table.get(parsed_table.span)
+
             cells, headers_rows, header_cells = [], [], []
             n_col, n_row = 0, 0
             caption = None
 
             if parsed_table.caption:
-                caption_text, caption_links = _parse_text_with_wikilinks(parsed_table.caption)
-                caption = Paragraph(text=caption_text, wiki_links=caption_links, abstract=False)
+                caption_paragraphs = _parse_wikitext_with_parser_from_hell(parsed_table.caption.strip())
+                caption_paragraphs = [
+                    [args[0], [WikiLink(*i) for i in args[1]], args[2]] for args in caption_paragraphs
+                ]
+                caption_paragraphs = [Paragraph(*args) for args in caption_paragraphs]
+                caption = caption_paragraphs
+
+                # caption = _parse_wikitext_with_parser_from_hell(parsed_table.caption)
+                # caption_text, caption_links = _parse_text_with_wikilinks(parsed_table.caption)
+                # caption = Paragraph(text=caption_text, wiki_links=caption_links, abstract=False)
 
             for r, row_obj in enumerate(parsed_table.cells()):
                 results_row = []
                 n_col = max(len(row_obj), n_col)
 
                 c_header_cell = 0
+                is_null_row = True
                 for c, cell in enumerate(row_obj):
                     cell_text = ""
                     is_header = False
@@ -545,9 +643,18 @@ def _parse_tables(wikipedia_title, wiki_text: str):
                         header_cells.append([r, c])
                         c_header_cell += 1
 
-                    cell_text, cell_links = _parse_text_with_wikilinks(cell_text)
-                    results_row.append(TableCell(cell_text, cell_links, is_header))
+                    # cell_paragraphs = _parse_wikitext_with_parser_from_hell(cell_text)
 
+                    cell_paragraphs = _parse_wikitext_with_parser_from_hell(cell_text.strip())
+                    cell_paragraphs = [[args[0], [WikiLink(*i) for i in args[1]], args[2]] for args in cell_paragraphs]
+                    cell_paragraphs = [Paragraph(*args) for args in cell_paragraphs]
+
+                    # cell_text, cell_links = _parse_text_with_wikilinks(cell_text)
+                    if cell_paragraphs:
+                        is_null_row = False
+                    results_row.append(TableCell(cell_paragraphs, is_header))
+                if is_null_row:
+                    continue
                 if c_header_cell >= len(row_obj) // 2:
                     headers_rows.append(r)
 
@@ -565,6 +672,8 @@ def _parse_tables(wikipedia_title, wiki_text: str):
                     caption=caption,
                     n_row=n_row,
                     n_col=n_col,
+                    out_text=table_out_text,
+                    # out_text_index=table_index,
                 )
             )
         except Exception:
@@ -577,16 +686,13 @@ def _parse_tables(wikipedia_title, wiki_text: str):
     return tables
 
 
-def _parse(page: WikiPage, preprocess_func):
-    if page.is_redirect:
-        return ("redirect", (page.title.encode("utf-8"), page.redirect.encode("utf-8")))
-
+def _parse_wikitext_with_parser_from_hell(wiki_text, preprocess_func=None, title=None):
     # remove style tags to reduce parsing errors
-    wiki_text = STYLE_RE.sub("", page.wiki_text)
+    wiki_text = STYLE_RE.sub("", wiki_text)
     try:
         parsed = mwparserfromhell.parse(wiki_text)
     except Exception:
-        logger.warn("Failed to parse wiki text: %s", page.title)
+        logger.warn("Failed to parse wiki text: %s", title)
         return None
 
     paragraphs = []
@@ -653,13 +759,26 @@ def _parse(page: WikiPage, preprocess_func):
 
     if cur_text and not cur_text.isspace():
         paragraphs.append([cur_text, cur_links, abstract])
+    return paragraphs
+
+
+def _parse(page: WikiPage, preprocess_func):
+    if page.is_redirect:
+        return ("redirect", (page.title.encode("utf-8"), page.redirect.encode("utf-8")))
+
+    paragraphs = _parse_wikitext_with_parser_from_hell(page.wiki_text, preprocess_func, page.title)
 
     ret = [paragraphs, page.is_disambiguation]
 
     encoded_title = page.title.encode("utf-8")
     encoded_paragraphs = frame.compress(pickle.dumps(ret, protocol=-1))
 
+    # Parse table content using wikitextparser
     tables = _parse_tables(page.title, page.wiki_text)
+
+    # if tables:
+    # print(tables[0].to_text())
+
     encoded_tables = frame.compress(pickle.dumps(tables, protocol=-1))
     return ("page", (encoded_title, encoded_paragraphs, encoded_tables))
 

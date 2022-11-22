@@ -1,15 +1,18 @@
 from typing import Dict, Optional
 
 import torch
-from luke.model import LukeConfig, LukeEncoder, LukeModel
-from luke.model_table import LukeTableConfig, LukeTableModel
-from luke.pretraining.metrics import Accuracy, Average
 from torch import nn
 from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.models.bert.modeling_bert import BertPreTrainingHeads
-from transformers.models.luke.modeling_luke import EntityPredictionHead, EntityPredictionHeadTransform
+from transformers.models.longformer.modeling_longformer import LongformerLMHead
+from transformers.models.luke.modeling_luke import (
+    EntityPredictionHead, EntityPredictionHeadTransform)
 from transformers.models.roberta.modeling_roberta import RobertaLMHead
+
+from luke.model import LukeConfig, LukeEncoder, LukeModel
+from luke.model_table import LukeTableConfig, LukeTableModel
+from luke.pretraining.metrics import Accuracy, Average
 
 
 class CLSEntityPredictionHead(nn.Module):
@@ -227,9 +230,13 @@ class LukeTablePretrainingModel(LukeTableModel):
     def __init__(self, config: LukeTableConfig):
         super().__init__(config)
 
-        if self.config.bert_model_name and "roberta" in self.config.bert_model_name:
-            self.lm_head = RobertaLMHead(config)
+        if self.config.bert_model_name:
+            if "roberta" in self.config.bert_model_name:
+                self.lm_head = RobertaLMHead(config)
+            else:  # "long" in self.config.bert_model_name:
+                self.lm_head = LongformerLMHead(config)
             self.lm_head.decoder.weight = self.embeddings.word_embeddings.weight
+
         else:
             self.cls = BertPreTrainingHeads(config)
             self.cls.predictions.decoder.weight = self.embeddings.word_embeddings.weight

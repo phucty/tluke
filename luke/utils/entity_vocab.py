@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Dict, List, TextIO
 
 import click
-from luke.utils.wikipedia_parser import WikipediaDumpDB
 from tqdm import tqdm
 from wikipedia2vec.dump_db import DumpDB
+
+from luke.utils.wikipedia_parser import WikipediaDumpDB
 
 from .interwiki_db import InterwikiDB
 
@@ -283,19 +284,21 @@ class EntityVocab:
             return counter
         for table in tables:
             if table.caption:
-                for wiki_link in table.caption.wiki_links:
-                    title = _dump_db.resolve_redirect(wiki_link.title)
-                    if title.startswith("Category:") or not _dump_db.is_wikipedia_page(title):
-                        continue
-                    counter[title] += 1
-
-            for row in table.cells:
-                for cell in row:
-                    for wiki_link in cell.wiki_links:
+                for paragraph in table.caption:
+                    for wiki_link in paragraph.wiki_links:
                         title = _dump_db.resolve_redirect(wiki_link.title)
                         if title.startswith("Category:") or not _dump_db.is_wikipedia_page(title):
                             continue
                         counter[title] += 1
+
+            for row in table.cells:
+                for cell in row:
+                    for paragraph in cell.paragraphs:
+                        for wiki_link in paragraph.wiki_links:
+                            title = _dump_db.resolve_redirect(wiki_link.title)
+                            if title.startswith("Category:") or not _dump_db.is_wikipedia_page(title):
+                                continue
+                            counter[title] += 1
         return counter
 
 

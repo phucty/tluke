@@ -6,15 +6,15 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers.models.bert.modeling_bert import (
-    BertEmbeddings,
-    BertIntermediate,
-    BertLayer,
-    BertOutput,
-    BertPooler,
-    BertSelfOutput,
-)
-from transformers.models.roberta.modeling_roberta import RobertaEmbeddings
+from transformers.models.bert.modeling_bert import (BertEmbeddings,
+                                                    BertIntermediate,
+                                                    BertLayer, BertOutput,
+                                                    BertPooler, BertSelfOutput)
+from transformers.models.longformer.modeling_longformer import (
+    LongformerEmbeddings, LongformerEncoder, LongformerPooler)
+from transformers.models.roberta.modeling_roberta import (RobertaEmbeddings,
+                                                          RobertaEncoder,
+                                                          RobertaPooler)
 
 from luke.model import LukeConfig, LukeModel
 
@@ -155,6 +155,57 @@ def create_position_ids_from_input_ids(input_ids, padding_idx, past_key_values_l
     return incremental_indices.long() + padding_idx
 
 
+class LongformerTableEmbeddings(LongformerEmbeddings):
+    def __init__(self, config):
+        super().__init__(config)
+        self.position_row_embeddings = nn.Embedding(config.max_num_rows + 1, config.hidden_size)
+        self.position_col_embeddings = nn.Embedding(config.max_num_cols + 1, config.hidden_size)
+
+    def forward(
+        self,
+        input_ids=None,
+        input_row_ids=None,
+        input_col_ids=None,
+        token_type_ids=None,
+        position_ids=None,
+        inputs_embeds=None,
+    ):
+        if position_ids is None:
+            if input_ids is not None:
+                # Create the position ids from the input token ids. Any padded tokens remain padded.
+                position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
+            else:
+                position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
+
+        if input_ids is not None:
+            input_shape = input_ids.size()
+        else:
+            input_shape = inputs_embeds.size()[:-1]
+
+        if token_type_ids is None:
+            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=position_ids.device)
+
+        if inputs_embeds is None:
+            inputs_embeds = self.word_embeddings(input_ids)
+        position_embeddings = self.position_embeddings(position_ids)
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        position_row_embeddings = self.position_row_embeddings(input_row_ids)
+        position_col_embeddings = self.position_col_embeddings(input_col_ids)
+
+        embeddings = (
+            inputs_embeds
+            + token_type_embeddings
+            + position_row_embeddings
+            + position_col_embeddings
+            + position_embeddings
+        )
+
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
+
 class RobertaTableEmbeddings(RobertaEmbeddings):
     def __init__(self, config):
         super().__init__(config)
@@ -283,14 +334,20 @@ class LukeTableModel(nn.Module):
 
         self.config = config
 
-        self.encoder = LukeTableEncoder(config)
-        self.pooler = BertPooler(config)
-
-        if self.config.bert_model_name and "roberta" in self.config.bert_model_name:
-            self.embeddings = RobertaTableEmbeddings(config)
+        if self.config.bert_model_name:
+            if "roberta" in self.config.bert_model_name:
+                self.embeddings = RobertaTableEmbeddings(config)
+                self.encoder = LukeTableEncoder(config)
+                self.pooler = BertPooler(config)
+            else:
+                self.embeddings = LongformerTableEmbeddings(config)
+                self.encoder = LongformerEncoder(config)
+                self.pooler = LongformerPooler(config)
             self.embeddings.token_type_embeddings.requires_grad = False
         else:
             self.embeddings = BertTableEmbeddings(config)
+            self.encoder = LukeTableEncoder(config)
+            self.pooler = BertPooler(config)
         self.entity_embeddings = TableEntityEmbeddings(config)
 
     def get_input_embeddings(self):

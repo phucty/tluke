@@ -15,16 +15,17 @@ from typing import Optional
 import click
 import tensorflow as tf
 import transformers
-from luke.pretraining.tokenization import tokenize, tokenize_segments
-from luke.utils.entity_vocab import UNK_TOKEN, EntityVocab
-from luke.utils.model_utils import ENTITY_VOCAB_FILE, METADATA_FILE, get_entity_vocab_file_path
-from luke.utils.sentence_splitter import SentenceSplitter
-from luke.utils.wikipedia_parser import Paragraph, WikiLink, WikipediaDumpDB
 from tensorflow.io import TFRecordWriter
 from tensorflow.train import Int64List
 from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizer
 from wikipedia2vec.dump_db import DumpDB
+
+from luke.pretraining.tokenization import tokenize, tokenize_segments
+from luke.utils.entity_vocab import UNK_TOKEN, EntityVocab
+from luke.utils.model_utils import ENTITY_VOCAB_FILE, METADATA_FILE, get_entity_vocab_file_path
+from luke.utils.sentence_splitter import SentenceSplitter
+from luke.utils.wikipedia_parser import Paragraph, WikiLink, WikipediaDumpDB
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +57,13 @@ _abstract_only = _language = None
 @click.option("--from-tables", is_flag=True)
 @click.option("--get-metadata", is_flag=True)
 @click.option("--get-headers", is_flag=True)
+@click.option("--get-outside-text", is_flag=True)
 @click.option("--max-num-rows", default=30)
 @click.option("--max-num-cols", default=20)
 @click.option("--max-cell-tokens", default=30)
-@click.option("--max-length-caption", default=100)
-@click.option("--max-header-tokens", default=16)
+@click.option("--max-length-metadata", default=128)
+@click.option("--max-header-tokens", default=30)
+@click.option("--max-outside-text-tokens", default=128)
 @click.option("--reset-position-index-per-cell", is_flag=True)
 def build_wikipedia_pretraining_dataset(
     dump_db_file: str, tokenizer_name: str, entity_vocab_file: str, output_dir: str, sentence_splitter: str, **kwargs
@@ -106,12 +109,16 @@ class WikipediaPretrainingDataset:
         return self.metadata["max_num_cols"]
 
     @property
-    def max_length_caption(self):
-        return self.metadata["max_length_caption"]
+    def max_length_metadata(self):
+        return self.metadata["max_length_metadata"]
 
     @property
     def max_header_tokens(self):
         return self.metadata["max_header_tokens"]
+
+    @property
+    def max_outside_text_tokens(self):
+        return self.metadata["max_outside_text_tokens"]
 
     @property
     def max_cell_tokens(self):
@@ -266,11 +273,13 @@ class WikipediaPretrainingDataset:
         from_tables: bool,
         get_metadata: bool,
         get_headers: bool,
+        get_outside_text: bool,
         max_num_rows: int,
         max_num_cols: int,
         max_cell_tokens: int,
-        max_length_caption: int,
+        max_length_metadata: int,
         max_header_tokens: int,
+        max_outside_text_tokens: int,
         reset_position_index_per_cell: bool,
     ):
 
@@ -299,16 +308,20 @@ class WikipediaPretrainingDataset:
         options = tf.io.TFRecordOptions(tf.compat.v1.io.TFRecordCompressionType.GZIP)
 
         if from_tables:
-            callback_process_page = WikipediaPretrainingDataset._process_page_with_tables
+            callback_process_page = WikipediaPretrainingDataset._process_page_with_tluke
             obj_name = "Samples"
         else:
             callback_process_page = WikipediaPretrainingDataset._process_page
             obj_name = "Paragraph"
 
         n_obj, n_examples = 0, 0
+        n_text, n_tdata, n_tpheader, n_tpmetadata, n_tptext = 0, 0, 0, 0, 0
 
         def update_desc():
-            return f"{obj_name}: {n_obj:,} - Examples: {n_examples:,}"
+            if from_tables:
+                return f"{obj_name}: {n_obj:,} - {n_text:,}|{n_tdata:,}|{n_tpheader:,}|{n_tpmetadata:,}|{n_tptext:,}"
+            else:
+                return f"{obj_name}: {n_obj:,} - Examples: {n_examples:,}"
 
         with TFRecordWriter(tf_file, options=options) as writer:
             pbar = tqdm(total=len(target_titles), desc=update_desc(), mininterval=5)
@@ -326,23 +339,39 @@ class WikipediaPretrainingDataset:
                 include_unk_entities,
                 get_metadata,
                 get_headers,
+                get_outside_text,
                 max_num_rows,
                 max_num_cols,
                 max_cell_tokens,
-                max_length_caption,
+                max_length_metadata,
                 max_header_tokens,
+                max_outside_text_tokens,
                 reset_position_index_per_cell,
             )
             # if pool_size == 1:
             # WikipediaPretrainingDataset._initialize_worker(*initargs)
             # for target_title in target_titles:
-            #     ret = callback_process_page(target_title)
+            # ret = callback_process_page(target_title)
             with closing(
                 Pool(pool_size, initializer=WikipediaPretrainingDataset._initialize_worker, initargs=initargs)
             ) as pool:
                 for ret in pool.imap(callback_process_page, target_titles, chunksize=chunk_size):
                     n_obj += 1
-                    n_examples += len(ret)
+                    if from_tables:
+                        ret_text, ret_tdata, ret_tpheader, ret_tpmetadata, ret_tptext = ret
+                        n_text += len(ret_text)
+                        n_tdata += len(ret_tdata)
+                        n_tpheader += len(ret_tpheader)
+                        n_tpmetadata += len(ret_tpmetadata)
+                        n_tptext += len(ret_tptext)
+                        ret = list(
+                            itertools.chain.from_iterable(
+                                [ret_text, ret_tdata, ret_tpheader, ret_tpmetadata, ret_tptext]
+                            )
+                        )
+                    else:
+                        n_examples += len(ret)
+
                     for data in ret:
                         writer.write(data)
                         number_of_items += 1
@@ -363,8 +392,9 @@ class WikipediaPretrainingDataset:
                     max_num_rows=max_num_rows,
                     max_num_cols=max_num_cols,
                     max_cell_tokens=max_cell_tokens,
-                    max_length_caption=max_length_caption,
+                    max_length_metadata=max_length_metadata,
                     max_header_tokens=max_header_tokens,
+                    max_outside_text_tokens=max_outside_text_tokens,
                     reset_position_index_per_cell=reset_position_index_per_cell,
                 ),
                 metadata_file,
@@ -386,11 +416,13 @@ class WikipediaPretrainingDataset:
         include_unk_entities: bool,
         get_metadata: bool,
         get_headers: bool,
+        get_outside_text: bool,
         max_num_rows: int,
         max_num_cols: int,
         max_cell_tokens: int,
-        max_length_caption: int,
+        max_length_metadata: int,
         max_header_tokens: int,
+        max_outside_text_tokens: int,
         reset_position_index_per_cell: bool,
     ):
         global _dump_db, _tokenizer, _sentence_splitter, _entity_vocab, _max_num_tokens, _max_entity_length
@@ -398,7 +430,7 @@ class WikipediaPretrainingDataset:
         global _abstract_only
         global _language
 
-        global _max_num_rows, _max_num_cols, _max_cell_value_length, _max_cell_tokens, _max_length_caption, _max_header_tokens, _get_metadata, _reset_position_index_per_cell, _get_headers
+        global _max_num_rows, _max_num_cols, _max_cell_value_length, _max_cell_tokens, _max_length_metadata, _max_header_tokens, _get_metadata, _reset_position_index_per_cell, _get_headers, _max_outside_text_tokens, _get_outside_text
 
         _dump_db = dump_db
         _tokenizer = tokenizer
@@ -416,10 +448,12 @@ class WikipediaPretrainingDataset:
         _max_num_rows = max_num_rows
         _max_num_cols = max_num_cols
         _max_cell_tokens = max_cell_tokens
-        _max_length_caption = max_length_caption
+        _max_length_metadata = max_length_metadata
         _max_header_tokens = max_header_tokens
+        _max_outside_text_tokens = max_outside_text_tokens
         _get_metadata = get_metadata
         _get_headers = get_headers
+        _get_outside_text = get_outside_text
         _reset_position_index_per_cell = reset_position_index_per_cell
 
     @staticmethod
@@ -532,55 +566,63 @@ class WikipediaPretrainingDataset:
         return ret
 
     @staticmethod
+    def _process_page_with_tluke(page_title: str):
+        ret_text = WikipediaPretrainingDataset._process_page_text(page_title)
+        ret_tdata, ret_tpheader, ret_tpmetadata, ret_tptext = WikipediaPretrainingDataset._process_page_with_tables(
+            page_title
+        )
+        return ret_text, ret_tdata, ret_tpheader, ret_tpmetadata, ret_tptext
+
+    @staticmethod
     def _process_page_with_tables(page_title: str):
         if _entity_vocab.contains(page_title, _language):
             page_id = _entity_vocab.get_id(page_title, _language)
         else:
             page_id = -1
 
-        # Add examples from paragraphs
-        ret = WikipediaPretrainingDataset._process_page_col_row(page_title)
+        ret_data, ret_header, ret_metadata, ret_text = [], [], [], []
         try:
             tables = _dump_db.get_tables(page_title)
         except Exception as message:
             print(f"Coud not load {page_title}")
             print(message)
-            return ret
+            return ret_data, ret_header, ret_metadata, ret_text
         if not tables:
-            return ret
+            return ret_data, ret_header, ret_metadata, ret_text
 
-        def resolve_links(paragraph, max_length=0):
+        def resolve_links(paragraphs):
             ret_links = []
-            if not max_length:
-                max_length = len(paragraph.text)
-            ret_text = paragraph.text[:max_length]  # [:_max_cell_value_length]
-            for link in paragraph.wiki_links:
-                if link.end > len(ret_text):
-                    ret_text = ret_text[: link.start]
-                    break
-                link_title = _dump_db.resolve_redirect(link.title)
-                # remove category links or invalid links
-                if link_title.startswith("Category:") and link.text.lower().startswith("category:"):
-                    ret_text = ret_text[: link.start] + " " * (link.end - link.start) + ret_text[link.end :]
-                elif not _dump_db.is_wikipedia_page(link_title):
-                    continue
-                else:
-                    if _entity_vocab.contains(link_title, _language):
-                        ret_links.append((link_title, link.start, link.end))
-                    elif _include_unk_entities:
-                        ret_links.append((UNK_TOKEN, link.start, link.end))
+            ret_text = ""
+            for paragraph in paragraphs:
+                ret_text += paragraph.text
+                for link in paragraph.wiki_links:
+                    link_title = _dump_db.resolve_redirect(link.title)
+                    # remove category links or invalid links
+                    if link_title.startswith("Category:") and link.text.lower().startswith("category:"):
+                        ret_text = ret_text[: link.start] + " " * (link.end - link.start) + ret_text[link.end :]
+                    elif not _dump_db.is_wikipedia_page(link_title):
+                        continue
+                    else:
+                        if _entity_vocab.contains(link_title, _language):
+                            ret_links.append((link_title, link.start, link.end))
+                        elif _include_unk_entities:
+                            ret_links.append((UNK_TOKEN, link.start, link.end))
             return ret_text, ret_links
 
         for table in tables:
+            if not table.cells:
+                continue
             # Table links are represented its form (link_title) and the start/end positions of strings, and col, and row index
             # Metadata
             # Wikipedia title
             metadata_text, metadata_links = resolve_links(
-                Paragraph(
-                    text=table.title,
-                    wiki_links=[WikiLink(table.title, table.title, 0, len(table.title))],
-                    abstract=False,
-                )
+                [
+                    Paragraph(
+                        text=table.title,
+                        wiki_links=[WikiLink(table.title, table.title, 0, len(table.title))],
+                        abstract=False,
+                    )
+                ]
             )
             # metadata_text = table.title
             # metadata is in col 0, row 0:  # [wikipedia title, row, col, link_start, link_end]
@@ -589,21 +631,27 @@ class WikipediaPretrainingDataset:
             if table.section:
                 # Get top section of Wikipedia
                 section_text, _ = resolve_links(
-                    Paragraph(
-                        text=table.section[0],
-                        wiki_links=[],
-                        abstract=False,
-                    )
+                    [
+                        Paragraph(
+                            text=table.section[0],
+                            wiki_links=[],
+                            abstract=False,
+                        )
+                    ]
                 )
                 metadata_text += ". "
                 metadata_text += section_text
             # Table caption
             if table.caption:
-                caption_text, caption_links = resolve_links(table.caption, max_length=_max_length_caption)
+                caption_text, caption_links = resolve_links(table.caption)
                 metadata_text += ". "
                 offset = len(metadata_text)
                 metadata_text += caption_text
                 metadata_links += [[title, 0, 0, offset + start, offset + end] for title, start, end in caption_links]
+
+            if table.out_text:
+                out_text_text, out_text_links = resolve_links(table.out_text)
+                out_text_links = [[title, 0, 0, start, end] for title, start, end in out_text_links]
 
             # Table headers concate table header rows --> first row: 0
             n_col = _max_num_cols if table.n_col > _max_num_cols else table.n_col
@@ -622,8 +670,10 @@ class WikipediaPretrainingDataset:
             if header_rows:
                 # Go reverse to get more specific information
                 for row_i in reversed(header_rows):
+                    if row_i >= len(table.cells):
+                        break
                     for col_i, cell in enumerate(table.cells[row_i][:_max_num_cols]):
-                        cell_text, cell_links = resolve_links(cell)
+                        cell_text, cell_links = resolve_links(cell.paragraphs)
                         if cell_text in header_text_set[col_i]:
                             continue
 
@@ -647,14 +697,14 @@ class WikipediaPretrainingDataset:
                 row_text = []
                 row_links = []
                 for col_i, cell in enumerate(row[:_max_num_cols]):
-                    cell_text, cell_links = resolve_links(cell)
+                    cell_text, cell_links = resolve_links(cell.paragraphs)
                     row_text.append(cell_text)
                     row_links.append([[title, row_i, col_i, start, end] for title, start, end in cell_links])
                 row_i += 1
                 data_text.append(row_text)
                 data_links.append(row_links)
 
-            def get_sentences(obj_text, obj_links, row_i, col_i):
+            def get_sentences(obj_text, obj_links, row_i, col_i, max_length):
                 sentences = []
                 sent_spans = _sentence_splitter.get_sentence_spans(obj_text.rstrip())
                 for sent_start, sent_end in sent_spans:
@@ -663,6 +713,15 @@ class WikipediaPretrainingDataset:
                     sent_links = []
                     # Look for links that are within the tokenized sentence.
                     # If a link is found, we separate the sentences across the link and tokenize them.
+                    sent_tokenized = tokenize(
+                        text=obj_text[cur:sent_end],
+                        tokenizer=_tokenizer,
+                        add_prefix_space=cur == 0 or obj_text[cur - 1] == " ",
+                    )
+                    if len(sent_words) > max_length:
+                        break
+
+                    is_break = False
                     for link_title, _, _, link_start, link_end in obj_links:
                         if not (sent_start <= link_start < sent_end and link_end <= sent_end):
                             continue
@@ -673,29 +732,35 @@ class WikipediaPretrainingDataset:
                             tokenizer=_tokenizer,
                             add_prefix_space=cur == 0 or obj_text[cur - 1] == " ",
                         )
+                        if len(sent_words) + len(sent_tokenized) > max_length:
+                            is_break = True
+                            break
 
                         sent_words.extend([(token, row_i, col_i) for token in sent_tokenized])
                         sent_links.append((entity_id, row_i, col_i, len(sent_words), len(sent_words) + len(link_words)))
                         sent_words.extend([(token, row_i, col_i) for token in link_words])
                         cur = link_end
-
-                    sent_tokenized = tokenize(
-                        text=obj_text[cur:sent_end],
-                        tokenizer=_tokenizer,
-                        add_prefix_space=cur == 0 or obj_text[cur - 1] == " ",
-                    )
+                    if is_break:
+                        break
                     sent_words.extend([(token, row_i, col_i) for token in sent_tokenized])
 
                     # ignore min and max sentence length
                     # if len(sent_words) < _min_sentence_length or len(sent_words) > _max_num_tokens:
                     # continue
+
                     sentences.append((sent_words, sent_links))
                 return sentences
 
-            sentences_metadata = get_sentences(metadata_text, metadata_links, 0, 0)
+            if table.out_text:
+                sentences_out_text = get_sentences(
+                    out_text_text, out_text_links, row_i=0, col_i=0, max_length=_max_outside_text_tokens
+                )
+            sentences_metadata = get_sentences(
+                metadata_text, metadata_links, row_i=0, col_i=0, max_length=_max_length_metadata
+            )
             # Column started at 1 (2nd)
             sentences_headers = [
-                get_sentences(header_text[col_i], header_links[col_i], 0, col_i + 1)
+                get_sentences(header_text[col_i], header_links[col_i], 0, col_i + 1, max_length=_max_header_tokens)
                 for col_i in range(len(header_text))
             ]
             # Column started at 1 (2nd), row is started at 1 (2nd)
@@ -704,7 +769,11 @@ class WikipediaPretrainingDataset:
                 sentences_row = []
                 for col_i in range(len(data_text[row_i])):
                     sentences_cell = get_sentences(
-                        data_text[row_i][col_i], data_links[row_i][col_i], row_i + 1, col_i + 1
+                        data_text[row_i][col_i],
+                        data_links[row_i][col_i],
+                        row_i + 1,
+                        col_i + 1,
+                        max_length=_max_cell_tokens,
                     )
                     sentences_row.append(sentences_cell)
                 sentences_data.append(sentences_row)
@@ -751,12 +820,22 @@ class WikipediaPretrainingDataset:
                 )
                 return example
 
-            def gen_example_with_setting(get_metadata: bool, get_headers: bool):
+            def gen_example_with_setting(get_metadata: bool, get_headers: bool, get_text: bool):
+                ret = []
                 prefix_words = []
                 prefix_links = []
+                # Add metadata
                 if get_metadata:
-                    # Add metadata
                     for sent_words, sent_links in sentences_metadata:
+                        prefix_links += [
+                            (id_, row, col, start + len(prefix_words), end + len(prefix_words))
+                            for id_, row, col, start, end in sent_links
+                        ]
+                        prefix_words += sent_words
+
+                # add outside text
+                if get_text and table.out_text:
+                    for sent_words, sent_links in sentences_out_text:
                         prefix_links += [
                             (id_, row, col, start + len(prefix_words), end + len(prefix_words))
                             for id_, row, col, start, end in sent_links
@@ -787,8 +866,8 @@ class WikipediaPretrainingDataset:
                         prefix_words += header_cell_text
 
                 if len(prefix_words) > _max_num_tokens:
-                    logger.warn("Number tokens in table caption, and headers are larger than max_tokens")
-                    return
+                    # logger.warn("Number tokens in table caption, and headers are larger than max_tokens")
+                    return ret
 
                 words = prefix_words.copy()
                 links = prefix_links.copy()
@@ -837,19 +916,25 @@ class WikipediaPretrainingDataset:
                     example = gen_examples(words, links)
                     if example:
                         ret.append((example.SerializeToString()))
+                return ret
 
             # Setting:
             # Just data
-            gen_example_with_setting(get_metadata=False, get_headers=False)
+            ret_data.extend(gen_example_with_setting(get_metadata=False, get_headers=False, get_text=False))
             # with headers
-            gen_example_with_setting(get_metadata=False, get_headers=True)
+            if _get_headers:
+                ret_header.extend(gen_example_with_setting(get_metadata=False, get_headers=True, get_text=False))
             # with headers and metadata
-            gen_example_with_setting(get_metadata=True, get_headers=True)
+            if _get_metadata:
+                ret_metadata.extend(gen_example_with_setting(get_metadata=True, get_headers=True, get_text=False))
+            # with text outside table
+            if _get_outside_text:
+                ret_text.extend(gen_example_with_setting(get_metadata=True, get_headers=True, get_text=True))
 
-        return ret
+        return ret_data, ret_header, ret_metadata, ret_text
 
     @staticmethod
-    def _process_page_col_row(page_title: str):
+    def _process_page_text(page_title: str):
         if _entity_vocab.contains(page_title, _language):
             page_id = _entity_vocab.get_id(page_title, _language)
         else:

@@ -4,14 +4,10 @@ from lib2to3.pgen2.token import tok_name
 import numpy as np
 import torch
 import tqdm
-from transformers import (
-    LukeForEntityClassification,
-    LukeForEntityPairClassification,
-    LukeForEntitySpanClassification,
-    LukeModel,
-    LukeTokenizer,
-    pipeline,
-)
+from transformers import (LukeForEntityClassification,
+                          LukeForEntityPairClassification,
+                          LukeForEntitySpanClassification, LukeModel,
+                          LukeTokenizer, pipeline)
 
 from luke.pretraining.train import pretrain
 from luke.utils.wikipedia_parser import _parse_tables
@@ -234,13 +230,9 @@ def huggingface_tut_using_transformers():
     from accelerate import Accelerator
     from datasets import load_dataset
     from torch.utils.data import DataLoader
-    from transformers import (
-        AdamW,
-        AutoModelForSequenceClassification,
-        AutoTokenizer,
-        DataCollatorWithPadding,
-        get_scheduler,
-    )
+    from transformers import (AdamW, AutoModelForSequenceClassification,
+                              AutoTokenizer, DataCollatorWithPadding,
+                              get_scheduler)
 
     raw_datasets = load_dataset("glue", "mrpc")
     checkpoint = "bert-base-uncased"
@@ -305,6 +297,12 @@ def huggingface_tut_using_transformers():
 
 
 if __name__ == "__main__":
+    from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained("studio-ousia/luke-base")
+
+    model = AutoModelForMaskedLM.from_pretrained("studio-ousia/luke-base")
+    model.save_pretrained("models/luke-base-1")
     # import debugpy
 
     # debugpy.listen(5678)
@@ -322,7 +320,7 @@ if __name__ == "__main__":
     # main_example()
     # run_luke_entity_classification()
     # run_luke_entity_pair_classification()
-    run_luke_entity_span_classification()
+    # run_luke_entity_span_classification()
     # run_notebook_open_entity_typing()
 
     # pretrain()

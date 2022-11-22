@@ -1,10 +1,10 @@
 {
   "train_batch_size": 2048,
-  "train_micro_batch_size_per_gpu": 4,
+  "train_micro_batch_size_per_gpu": 8,
   "optimizer": {
     "type": "AdamW",
     "params": {
-      "lr": 5e-4,
+      "lr": 1e-5,
       "betas": [
         0.9,
         0.999
@@ -18,8 +18,8 @@
     "type": "WarmupDecayLR",
     "params": {
       "warmup_min_lr": 0,
-      "warmup_max_lr": 5e-4,
-      "warmup_num_steps": 1,
+      "warmup_max_lr": 1e-5,
+      "warmup_num_steps": 10,
       "total_num_steps": 19,
       "warmup_type": "linear"
     }

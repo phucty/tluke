@@ -10,9 +10,10 @@ from operator import neg
 from typing import Dict, List, NamedTuple
 
 import numpy as np
+from transformers.models.roberta import RobertaTokenizer
+
 from luke.pretraining.dataset import WikipediaPretrainingDataset
 from luke.utils.entity_vocab import MASK_TOKEN
-from transformers.models.roberta import RobertaTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -437,7 +438,7 @@ class LukeTablePretrainingBatchWorker(LukePretrainingBatchWorker):
         self._max_num_rows = representative_dataset.max_num_rows
         self._max_num_cols = representative_dataset.max_num_cols
         self._max_cell_tokens = representative_dataset.max_cell_tokens
-        self._max_length_caption = representative_dataset.max_length_caption
+        self._max_length_metadata = representative_dataset.max_length_metadata
         self._max_header_tokens = representative_dataset.max_header_tokens
         self._cls_id = self._tokenizer.convert_tokens_to_ids(self._tokenizer.cls_token)
         self._sep_id = self._tokenizer.convert_tokens_to_ids(self._tokenizer.sep_token)
